@@ -41,7 +41,8 @@ fn wait_any_with_timeout() -> WaitStatus {
                 if start.elapsed().as_secs() >= 5 { // Increased timeout for multi-process bash
                     panic!("Process group timed out");
                 }
-                std::thread::sleep(std::time::Duration::from_millis(10));
+                std::thread::yield_now();
+                std::thread::sleep(std::time::Duration::from_micros(100));
             }
             other => return other,
         }
