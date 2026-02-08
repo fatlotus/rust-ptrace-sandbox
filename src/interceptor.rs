@@ -147,7 +147,7 @@ fn handle_syscall_entry<L: Linux>(pid: Pid, handler: &mut L) -> Option<i64> {
         Some(Sysno::read) => {
             let fd = regs.rdi as i32;
             let count = regs.rdx as usize;
-            let _buf = handler.read(fd, count);
+            let _ = handler.read(fd, count);
             None // Passthru: let the real syscall handle the memory move
         }
         Some(Sysno::write) => {
@@ -155,7 +155,10 @@ fn handle_syscall_entry<L: Linux>(pid: Pid, handler: &mut L) -> Option<i64> {
             let addr = regs.rsi as usize;
             let count = regs.rdx as usize;
             let buf = read_memory(pid, addr, count);
-            Some(handler.write(fd, &buf) as i64)
+            match handler.write(fd, &buf) {
+                Ok(res) => Some(res as i64),
+                Err(err) => Some(-(err as i32) as i64),
+            }
         }
         Some(Sysno::open) => {
             let addr = regs.rdi as usize;
@@ -227,30 +230,30 @@ fn handle_syscall_entry<L: Linux>(pid: Pid, handler: &mut L) -> Option<i64> {
         }
         Some(Sysno::exit) => {
             let status = regs.rdi as i32;
-            handler.exit(status);
+            let _ = handler.exit(status);
             None // Passthru: let the child actually exit!
         }
         Some(Sysno::exit_group) => {
             let status = regs.rdi as i32;
-            handler.exit_group(status);
+            let _ = handler.exit_group(status);
             None // Passthru: let the child actually exit!
         }
         Some(Sysno::fork) => {
-            handler.fork();
+            let _ = handler.fork();
             None
         }
         Some(Sysno::vfork) => {
-            handler.vfork();
+            let _ = handler.vfork();
             None
         }
         Some(Sysno::clone) => {
             let flags = regs.rdi as i32;
-            handler.clone(flags);
+            let _ = handler.clone(flags);
             None
         }
         Some(Sysno::clone3) => {
             // Mapping clone3 to clone for logging
-            handler.clone(0);
+            let _ = handler.clone(0);
             None
         }
         _ => None,
