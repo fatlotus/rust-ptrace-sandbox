@@ -19,5 +19,5 @@ fn test_date() {
     assert!(stdout.contains("20"));
     
     // Verify syscalls
-    assert!(stdout.contains("futex("));
+    assert!(stdout.contains("clock_gettime("));
 }

@@ -4,6 +4,7 @@ use nix::unistd::{execvp, fork, ForkResult, Pid};
 use std::ffi::CString;
 use crate::linux::Linux;
 use syscalls::Sysno;
+use crate::vdso;
 
 pub fn run_with_interceptor<L: Linux>(cmd: &str, args: &[&str], mut handler: L) {
     match unsafe { fork() } {
@@ -46,6 +47,11 @@ fn waitpid_with_timeout(child: Pid) -> WaitStatus {
 fn parent_loop<L: Linux>(child: Pid, handler: &mut L) {
     // Initial wait
     waitpid_with_timeout(child);
+    
+    // Disable vDSO before we start tracing syscalls
+    let regs = ptrace::getregs(child).expect("Failed to get regs for vDSO disable");
+    vdso::disable_vdso(child, regs.rsp);
+
     ptrace::setoptions(child, ptrace::Options::PTRACE_O_TRACESYSGOOD).expect("Failed to set options");
 
     let mut in_syscall = false;

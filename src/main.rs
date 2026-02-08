@@ -1,6 +1,7 @@
 mod linux;
 mod passthru;
 mod interceptor;
+mod vdso;
 
 use passthru::Passthru;
 use interceptor::run_with_interceptor;

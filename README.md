@@ -29,6 +29,7 @@ close(3) = 0
 
 - `src/linux.rs`: The `Linux` trait which defines system calls (`read`, `write`, `open`, `close`, `brk`, `mmap`, `clock_gettime`, etc.).
 - `src/passthru.rs`: A "passthru" implementation of the `Linux` trait that logs and forwards syscalls to the native OS.
+- `src/vdso.rs`: Logic to disable the virtual Dynamic Shared Object (vDSO) in tracee processes. This ensures that syscalls like `clock_gettime` are forced to go through the kernel where they can be intercepted.
 - `src/interceptor.rs`: The core logic that handles the ptrace loop. It includes a `waitpid` timeout (1 second) to prevent hangs and safely terminates stalling child processes.
 - `src/main.rs`: The CLI entry point.
 
