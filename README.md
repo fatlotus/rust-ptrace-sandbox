@@ -48,6 +48,7 @@ The following tests verify functionality:
 - `tests/cat_test.rs`: File IO interception (openat, read, write, close).
 - `tests/date_test.rs`: Time interception (clock_gettime).
 - `tests/fork_test.rs`: Process creation interception (fork, vfork, clone).
+- `tests/networking.rs`: Networking interception (socket, bind, accept, connect).
 
 ## Limitations
 

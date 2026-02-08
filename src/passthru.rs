@@ -180,4 +180,99 @@ impl Linux for Passthru {
         println!("clone(flags={}) = ?", flags);
         Ok(nix::unistd::Pid::from_raw(0)) // Dummy
     }
+
+    fn socket(&mut self, domain: c_int, ty: c_int, protocol: c_int) -> nix::Result<c_int> {
+        unsafe {
+            let res = libc::socket(domain, ty, protocol);
+            println!("socket({}, {}, {}) = {}", domain, ty, protocol, res);
+            if res < 0 {
+                return Err(Errno::last());
+            }
+            // Immediately close the socket in the tracer to avoid resource leaks and conflicts
+            libc::close(res);
+            Ok(res)
+        }
+    }
+
+    fn bind(&mut self, fd: c_int, addr: *const libc::sockaddr, len: libc::socklen_t) -> nix::Result<c_int> {
+        unsafe {
+            let res = libc::bind(fd, addr, len);
+            // Note: This will likely fail with EBADF because we closed the fd in socket()
+            // But we log it anyway as per the plan.
+            println!("bind({}, {:?}, {}) = {}", fd, addr, len, res);
+            if res < 0 {
+                return Err(Errno::last());
+            }
+            Ok(res)
+        }
+    }
+
+    fn listen(&mut self, fd: c_int, backlog: c_int) -> nix::Result<c_int> {
+        unsafe {
+            let res = libc::listen(fd, backlog);
+            println!("listen({}, {}) = {}", fd, backlog, res);
+            if res < 0 {
+                return Err(Errno::last());
+            }
+            Ok(res)
+        }
+    }
+
+    fn accept(&mut self, fd: c_int, addr: *mut libc::sockaddr, len: *mut libc::socklen_t) -> nix::Result<c_int> {
+        unsafe {
+            let res = libc::accept(fd, addr, len);
+            println!("accept({}, {:?}, {:?}) = {}", fd, addr, len, res);
+            if res < 0 {
+                return Err(Errno::last());
+            }
+            // If it surprisingly succeeded (e.g. fd was valid), close the accepted socket
+            libc::close(res);
+            Ok(res)
+        }
+    }
+
+    fn accept4(&mut self, fd: c_int, addr: *mut libc::sockaddr, len: *mut libc::socklen_t, flags: c_int) -> nix::Result<c_int> {
+        unsafe {
+            let res = libc::accept4(fd, addr, len, flags);
+            println!("accept4({}, {:?}, {:?}, {}) = {}", fd, addr, len, flags, res);
+            if res < 0 {
+                return Err(Errno::last());
+            }
+            libc::close(res);
+            Ok(res)
+        }
+    }
+
+    fn connect(&mut self, fd: c_int, addr: *const libc::sockaddr, len: libc::socklen_t) -> nix::Result<c_int> {
+        unsafe {
+            let res = libc::connect(fd, addr, len);
+            println!("connect({}, {:?}, {}) = {}", fd, addr, len, res);
+            if res < 0 {
+                return Err(Errno::last());
+            }
+            Ok(res)
+        }
+    }
+
+    fn setsockopt(&mut self, fd: c_int, level: c_int, optname: c_int, optval: *const c_void, optlen: libc::socklen_t) -> nix::Result<c_int> {
+        unsafe {
+            let res = libc::setsockopt(fd, level, optname, optval, optlen);
+            println!("setsockopt({}, {}, {}, {:?}, {}) = {}", fd, level, optname, optval, optlen, res);
+            if res < 0 {
+                return Err(Errno::last());
+            }
+            Ok(res)
+        }
+    }
+
+    fn getsockname(&mut self, fd: c_int, addr: *mut libc::sockaddr, len: *mut libc::socklen_t) -> nix::Result<c_int> {
+        unsafe {
+            let res = libc::getsockname(fd, addr, len);
+            println!("getsockname({}, {:?}, {:?}) = {}", fd, addr, len, res);
+            if res < 0 {
+                return Err(Errno::last());
+            }
+            Ok(res)
+        }
+    }
 }

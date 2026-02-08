@@ -257,6 +257,64 @@ fn handle_syscall_entry<L: Linux>(pid: Pid, handler: &mut L) -> Option<i64> {
             let _ = handler.clone(0);
             None
         }
+        Some(Sysno::socket) => {
+            let domain = regs.rdi as i32;
+            let ty = regs.rsi as i32;
+            let protocol = regs.rdx as i32;
+            let _ = handler.socket(domain, ty, protocol);
+            None // Passthru
+        }
+        Some(Sysno::bind) => {
+            let fd = regs.rdi as i32;
+            let addr = regs.rsi as *const libc::sockaddr;
+            let len = regs.rdx as libc::socklen_t;
+            let _ = handler.bind(fd, addr, len);
+            None // Passthru
+        }
+        Some(Sysno::listen) => {
+            let fd = regs.rdi as i32;
+            let backlog = regs.rsi as i32;
+            let _ = handler.listen(fd, backlog);
+            None // Passthru
+        }
+        Some(Sysno::accept) => {
+            let fd = regs.rdi as i32;
+            let addr = regs.rsi as *mut libc::sockaddr;
+            let len = regs.rdx as *mut libc::socklen_t;
+            let _ = handler.accept(fd, addr, len);
+            None // Passthru
+        }
+        Some(Sysno::accept4) => {
+            let fd = regs.rdi as i32;
+            let addr = regs.rsi as *mut libc::sockaddr;
+            let len = regs.rdx as *mut libc::socklen_t;
+            let flags = regs.r10 as i32;
+            let _ = handler.accept4(fd, addr, len, flags);
+            None // Passthru
+        }
+        Some(Sysno::connect) => {
+            let fd = regs.rdi as i32;
+            let addr = regs.rsi as *const libc::sockaddr;
+            let len = regs.rdx as libc::socklen_t;
+            let _ = handler.connect(fd, addr, len);
+            None // Passthru
+        }
+        Some(Sysno::setsockopt) => {
+            let fd = regs.rdi as i32;
+            let level = regs.rsi as i32;
+            let optname = regs.rdx as i32;
+            let optval = regs.r10 as *const libc::c_void;
+            let optlen = regs.r8 as libc::socklen_t;
+            let _ = handler.setsockopt(fd, level, optname, optval, optlen);
+            None // Passthru
+        }
+        Some(Sysno::getsockname) => {
+            let fd = regs.rdi as i32;
+            let addr = regs.rsi as *mut libc::sockaddr;
+            let len = regs.rdx as *mut libc::socklen_t;
+            let _ = handler.getsockname(fd, addr, len);
+            None // Passthru
+        }
         _ => None,
     }
 }

@@ -43,7 +43,7 @@ pub fn disable_vdso(child: Pid, sp: u64) {
         
         if key == 33 { // AT_SYSINFO_EHDR
             vdso_addr = val;
-            let _ = unsafe { ptrace::write(child, val_addr, 0i64) };
+            let _ = ptrace::write(child, val_addr, 0i64);
             break;
         }
         addr += 16;
@@ -55,7 +55,7 @@ pub fn disable_vdso(child: Pid, sp: u64) {
             let test_addr = (sp + i * 8) as *mut c_void;
             if let Ok(val) = ptrace::read(child, test_addr) {
                 if val as u64 == vdso_addr {
-                    let _ = unsafe { ptrace::write(child, test_addr, 0i64) };
+                    let _ = ptrace::write(child, test_addr, 0i64);
                 }
             }
         }

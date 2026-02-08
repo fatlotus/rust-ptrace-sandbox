@@ -77,4 +77,28 @@ pub trait Linux {
     ///
     /// These system calls create a new ("child") process, in a manner similar to fork(2).
     fn clone(&mut self, flags: c_int) -> nix::Result<nix::unistd::Pid>;
+
+    /// socket - create an endpoint for communication
+    fn socket(&mut self, domain: c_int, ty: c_int, protocol: c_int) -> nix::Result<c_int>;
+
+    /// bind - bind a name to a socket
+    fn bind(&mut self, fd: c_int, addr: *const libc::sockaddr, len: libc::socklen_t) -> nix::Result<c_int>;
+
+    /// listen - listen for connections on a socket
+    fn listen(&mut self, fd: c_int, backlog: c_int) -> nix::Result<c_int>;
+
+    /// accept - accept a connection on a socket
+    fn accept(&mut self, fd: c_int, addr: *mut libc::sockaddr, len: *mut libc::socklen_t) -> nix::Result<c_int>;
+
+    /// accept4 - accept a connection on a socket
+    fn accept4(&mut self, fd: c_int, addr: *mut libc::sockaddr, len: *mut libc::socklen_t, flags: c_int) -> nix::Result<c_int>;
+
+    /// connect - initiate a connection on a socket
+    fn connect(&mut self, fd: c_int, addr: *const libc::sockaddr, len: libc::socklen_t) -> nix::Result<c_int>;
+
+    /// setsockopt - set options on sockets
+    fn setsockopt(&mut self, fd: c_int, level: c_int, optname: c_int, optval: *const c_void, optlen: libc::socklen_t) -> nix::Result<c_int>;
+
+    /// getsockname - get socket name
+    fn getsockname(&mut self, fd: c_int, addr: *mut libc::sockaddr, len: *mut libc::socklen_t) -> nix::Result<c_int>;
 }
