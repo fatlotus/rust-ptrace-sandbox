@@ -3,6 +3,7 @@ use nix::sys::wait::{waitpid, WaitStatus};
 use nix::unistd::{execvp, fork, ForkResult, Pid};
 use std::ffi::CString;
 use crate::linux::Linux;
+use syscalls::Sysno;
 
 pub fn run_with_interceptor<L: Linux>(cmd: &str, args: &[&str], mut handler: L) {
     match unsafe { fork() } {
@@ -94,22 +95,23 @@ fn parent_loop<L: Linux>(child: Pid, handler: &mut L) {
 fn handle_syscall_entry<L: Linux>(pid: Pid, handler: &mut L) -> Option<i64> {
     let regs = ptrace::getregs(pid).expect("Failed to get regs");
     let syscall_no = regs.orig_rax;
+    let sysno = Sysno::new(syscall_no as usize);
 
-    match syscall_no {
-        0 => { // read
+    match sysno {
+        Some(Sysno::read) => {
             let fd = regs.rdi as i32;
             let count = regs.rdx as usize;
             let _buf = handler.read(fd, count);
             None // Passthru: let the real syscall handle the memory move
         }
-        1 => { // write
+        Some(Sysno::write) => {
             let fd = regs.rdi as i32;
             let addr = regs.rsi as usize;
             let count = regs.rdx as usize;
             let buf = read_memory(pid, addr, count);
             Some(handler.write(fd, &buf) as i64)
         }
-        2 => { // open
+        Some(Sysno::open) => {
             let addr = regs.rdi as usize;
             let flags = regs.rsi as i32;
             let mode = regs.rdx as libc::mode_t;
@@ -117,17 +119,17 @@ fn handle_syscall_entry<L: Linux>(pid: Pid, handler: &mut L) -> Option<i64> {
             let _ = handler.open(&pathname, flags, mode);
             None // Passthru
         }
-        3 => { // close
+        Some(Sysno::close) => {
             let fd = regs.rdi as i32;
             let _ = handler.close(fd);
             None // Passthru
         }
-        5 => { // fstat
+        Some(Sysno::fstat) => {
             let fd = regs.rdi as i32;
             let _ = handler.fstat(fd);
             None // Passthru
         }
-        9 => { // mmap
+        Some(Sysno::mmap) => {
             let addr = regs.rdi as *mut libc::c_void;
             let length = regs.rsi as usize;
             let prot = regs.rdx as i32;
@@ -137,23 +139,23 @@ fn handle_syscall_entry<L: Linux>(pid: Pid, handler: &mut L) -> Option<i64> {
             let _ = handler.mmap(addr, length, prot, flags, fd, offset);
             None // Passthru
         }
-        11 => { // munmap
+        Some(Sysno::munmap) => {
             let addr = regs.rdi as *mut libc::c_void;
             let length = regs.rsi as usize;
             let _ = handler.munmap(addr, length);
             None // Passthru
         }
-        12 => { // brk
+        Some(Sysno::brk) => {
             let addr = regs.rdi as *mut libc::c_void;
             let _ = handler.brk(addr);
             None // Passthru
         }
-        202 => { // clock_gettime
+        Some(Sysno::clock_gettime) => {
             let clk_id = regs.rdi as libc::clockid_t;
             let _ = handler.clock_gettime(clk_id);
             None // Passthru
         }
-        257 => { // openat
+        Some(Sysno::openat) => {
             let dirfd = regs.rdi as i32;
             let addr = regs.rsi as usize;
             let flags = regs.rdx as i32;
@@ -162,7 +164,7 @@ fn handle_syscall_entry<L: Linux>(pid: Pid, handler: &mut L) -> Option<i64> {
             let _ = handler.openat(dirfd, &pathname, flags, mode);
             None // Passthru
         }
-        262 => { // newfstatat
+        Some(Sysno::newfstatat) => {
             let dirfd = regs.rdi as i32;
             let addr = regs.rsi as usize;
             let flags = regs.r10 as i32;
@@ -170,13 +172,21 @@ fn handle_syscall_entry<L: Linux>(pid: Pid, handler: &mut L) -> Option<i64> {
             let _ = handler.newfstatat(dirfd, &pathname, flags);
             None // Passthru
         }
-        60 | 231 => { // exit | exit_group
+        Some(Sysno::futex) => {
+            let uaddr = regs.rdi as *mut i32;
+            let op = regs.rsi as i32;
+            let val = regs.rdx as i32;
+            println!("futex({:?}, {}, {}, ...) = passthru", uaddr, op, val);
+            None // Passthru
+        }
+        Some(Sysno::exit) => {
             let status = regs.rdi as i32;
-            if syscall_no == 60 {
-                handler.exit(status);
-            } else {
-                handler.exit_group(status);
-            }
+            handler.exit(status);
+            Some(0)
+        }
+        Some(Sysno::exit_group) => {
+            let status = regs.rdi as i32;
+            handler.exit_group(status);
             Some(0)
         }
         _ => None,
