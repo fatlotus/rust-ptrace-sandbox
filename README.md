@@ -8,25 +8,28 @@ Make it possible to implement all system calls of a target process using safe Ru
 
 ## Usage
 
-You can run any command under the ptrace sandbox using the `Passthru` implementation:
+You can run commands like `echo`, `date`, and `cat` under the ptrace sandbox:
 
 ```bash
 cargo run -- /bin/echo "hello world"
+cargo run -- /bin/date
+cargo run -- /bin/cat Cargo.toml
 ```
 
 The output will show the intercepted system calls and their results:
 
 ```
-brk(0x0) = 0
-write(1, "hello world\n", 12) = 12
-exit_group(0)
+openat(AT_FDCWD, "Cargo.toml", O_RDONLY, 0) = 3
+read(3, ..., 8192) = 181
+write(1, "...", 181) = 181
+close(3) = 0
 ```
 
 ## Code Layout
 
-- `src/linux.rs`: The `Linux` trait which defines system calls using idiomatic Rust types (from `libc`).
+- `src/linux.rs`: The `Linux` trait which defines system calls (`read`, `write`, `open`, `close`, `brk`, `mmap`, `clock_gettime`, etc.).
 - `src/passthru.rs`: A "passthru" implementation of the `Linux` trait that logs and forwards syscalls to the native OS.
-- `src/interceptor.rs`: The core logic that spawns a child process with `PTRACE_TRACEME` and handles the syscall interception loop, including memory reading from the child process.
+- `src/interceptor.rs`: The core logic that handles the ptrace loop. It includes a `waitpid` timeout (1 second) to prevent hangs and safely terminates stalling child processes.
 - `src/main.rs`: The CLI entry point.
 
 ## Testing
@@ -39,4 +42,7 @@ To run the integration tests:
 cargo test
 ```
 
-The `tests/echo_test.rs` verifies that `/bin/echo` runs correctly under the sandbox and that system calls are being intercepted as expected.
+The following tests verify functionality:
+- `tests/echo_test.rs`: Basic write/brk interception.
+- `tests/cat_test.rs`: File IO interception (openat, read, write, close).
+- `tests/date_test.rs`: Time interception (clock_gettime).

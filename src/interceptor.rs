@@ -25,8 +25,26 @@ pub fn run_with_interceptor<L: Linux>(cmd: &str, args: &[&str], mut handler: L) 
     }
 }
 
+fn waitpid_with_timeout(child: Pid) -> WaitStatus {
+    let start = std::time::Instant::now();
+    loop {
+        match waitpid(child, Some(nix::sys::wait::WaitPidFlag::WNOHANG)).expect("Wait failed") {
+            WaitStatus::StillAlive => {
+                if start.elapsed().as_secs() >= 1 {
+                    eprintln!("Child process timed out, killing...");
+                    let _ = nix::sys::signal::kill(child, nix::sys::signal::Signal::SIGKILL);
+                    panic!("Child process timed out");
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            other => return other,
+        }
+    }
+}
+
 fn parent_loop<L: Linux>(child: Pid, handler: &mut L) {
-    waitpid(child, None).expect("Initial wait failed");
+    // Initial wait
+    waitpid_with_timeout(child);
     ptrace::setoptions(child, ptrace::Options::PTRACE_O_TRACESYSGOOD).expect("Failed to set options");
 
     let mut in_syscall = false;
@@ -34,16 +52,15 @@ fn parent_loop<L: Linux>(child: Pid, handler: &mut L) {
 
     loop {
         ptrace::syscall(child, None).expect("PTRACE_SYSCALL failed");
-        match waitpid(child, None).expect("Wait failed") {
+        
+        let status = waitpid_with_timeout(child);
+
+        match status {
             WaitStatus::PtraceSyscall(_) => {
                 if !in_syscall {
                     // Syscall Entry
                     if let Some(res) = handle_syscall_entry(child, handler) {
                         saved_result = res;
-                        // To "replace" the syscall, we change the syscall number to an invalid one
-                        // some use -1, but some kernels might treat that specially. 
-                        // Let's try something like 999 or just keep it and overwrite at exit.
-                        // Actually, if we want to SKIP it, we should change it to something harmless or -1.
                         let mut regs = ptrace::getregs(child).expect("Failed to get regs");
                         regs.orig_rax = u64::MAX; // -1 as u64
                         ptrace::setregs(child, regs).expect("Failed to set regs");
@@ -79,12 +96,79 @@ fn handle_syscall_entry<L: Linux>(pid: Pid, handler: &mut L) -> Option<i64> {
     let syscall_no = regs.orig_rax;
 
     match syscall_no {
+        0 => { // read
+            let fd = regs.rdi as i32;
+            let count = regs.rdx as usize;
+            let _buf = handler.read(fd, count);
+            None // Passthru: let the real syscall handle the memory move
+        }
         1 => { // write
             let fd = regs.rdi as i32;
             let addr = regs.rsi as usize;
             let count = regs.rdx as usize;
             let buf = read_memory(pid, addr, count);
             Some(handler.write(fd, &buf) as i64)
+        }
+        2 => { // open
+            let addr = regs.rdi as usize;
+            let flags = regs.rsi as i32;
+            let mode = regs.rdx as libc::mode_t;
+            let pathname = read_string(pid, addr);
+            let _ = handler.open(&pathname, flags, mode);
+            None // Passthru
+        }
+        3 => { // close
+            let fd = regs.rdi as i32;
+            let _ = handler.close(fd);
+            None // Passthru
+        }
+        5 => { // fstat
+            let fd = regs.rdi as i32;
+            let _ = handler.fstat(fd);
+            None // Passthru
+        }
+        9 => { // mmap
+            let addr = regs.rdi as *mut libc::c_void;
+            let length = regs.rsi as usize;
+            let prot = regs.rdx as i32;
+            let flags = regs.r10 as i32;
+            let fd = regs.r8 as i32;
+            let offset = regs.r9 as libc::off_t;
+            let _ = handler.mmap(addr, length, prot, flags, fd, offset);
+            None // Passthru
+        }
+        11 => { // munmap
+            let addr = regs.rdi as *mut libc::c_void;
+            let length = regs.rsi as usize;
+            let _ = handler.munmap(addr, length);
+            None // Passthru
+        }
+        12 => { // brk
+            let addr = regs.rdi as *mut libc::c_void;
+            let _ = handler.brk(addr);
+            None // Passthru
+        }
+        202 => { // clock_gettime
+            let clk_id = regs.rdi as libc::clockid_t;
+            let _ = handler.clock_gettime(clk_id);
+            None // Passthru
+        }
+        257 => { // openat
+            let dirfd = regs.rdi as i32;
+            let addr = regs.rsi as usize;
+            let flags = regs.rdx as i32;
+            let mode = regs.r10 as libc::mode_t;
+            let pathname = read_string(pid, addr);
+            let _ = handler.openat(dirfd, &pathname, flags, mode);
+            None // Passthru
+        }
+        262 => { // newfstatat
+            let dirfd = regs.rdi as i32;
+            let addr = regs.rsi as usize;
+            let flags = regs.r10 as i32;
+            let pathname = read_string(pid, addr);
+            let _ = handler.newfstatat(dirfd, &pathname, flags);
+            None // Passthru
         }
         60 | 231 => { // exit | exit_group
             let status = regs.rdi as i32;
@@ -93,13 +177,25 @@ fn handle_syscall_entry<L: Linux>(pid: Pid, handler: &mut L) -> Option<i64> {
             } else {
                 handler.exit_group(status);
             }
-            Some(0) // Doesn't really matter as it exits
-        }
-        12 => { // brk
-            let addr = regs.rdi as *mut libc::c_void;
-            Some(handler.brk(addr) as i64)
+            Some(0)
         }
         _ => None,
+    }
+}
+
+fn read_string(pid: Pid, addr: usize) -> String {
+    let mut result = Vec::new();
+    let mut current_addr = addr;
+    loop {
+        let word = ptrace::read(pid, current_addr as *mut _).unwrap_or(0);
+        let bytes: [u8; 8] = word.to_ne_bytes();
+        for &b in &bytes {
+            if b == 0 {
+                return String::from_utf8_lossy(&result).into_owned();
+            }
+            result.push(b);
+        }
+        current_addr += 8;
     }
 }
 
