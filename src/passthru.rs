@@ -91,12 +91,12 @@ impl Linux for Passthru {
 
     fn exit(&mut self, status: c_int) {
         println!("exit({})", status);
-        unsafe { libc::exit(status) }
+        // Do not actually exit here, let the interceptor handle it via syscall passthrough
     }
 
     fn exit_group(&mut self, status: c_int) {
         println!("exit_group({})", status);
-        unsafe { libc::syscall(libc::SYS_exit_group, status); }
+        // Do not actually exit here, let the interceptor handle it via syscall passthrough
     }
 
     fn brk(&mut self, addr: *mut c_void) -> *mut c_void {
@@ -118,5 +118,20 @@ impl Linux for Passthru {
             println!("clock_gettime({}, ...) = {}", clk_id, res);
             res
         }
+    }
+
+    fn fork(&mut self) -> nix::unistd::Pid {
+        println!("fork() = ?");
+        nix::unistd::Pid::from_raw(0) // Dummy, handled by interceptor
+    }
+
+    fn vfork(&mut self) -> nix::unistd::Pid {
+        println!("vfork() = ?");
+        nix::unistd::Pid::from_raw(0) // Dummy, handled by interceptor
+    }
+
+    fn clone(&mut self, flags: c_int) -> nix::unistd::Pid {
+        println!("clone(flags={}) = ?", flags);
+        nix::unistd::Pid::from_raw(0) // Dummy, handled by interceptor
     }
 }

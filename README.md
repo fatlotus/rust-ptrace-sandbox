@@ -47,3 +47,9 @@ The following tests verify functionality:
 - `tests/echo_test.rs`: Basic write/brk interception.
 - `tests/cat_test.rs`: File IO interception (openat, read, write, close).
 - `tests/date_test.rs`: Time interception (clock_gettime).
+- `tests/fork_test.rs`: Process creation interception (fork, vfork, clone).
+
+## Limitations
+
+- The `Passthru` implementation of `exit` and `exit_group` now correctly passes the syscall to the child process instead of killing the tracer.
+- `fork`, `vfork`, and `clone` are intercepted to allow tracing of child processes.

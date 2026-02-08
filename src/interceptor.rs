@@ -5,6 +5,12 @@ use std::ffi::CString;
 use crate::linux::Linux;
 use syscalls::Sysno;
 use crate::vdso;
+use std::collections::HashMap;
+
+struct ChildState {
+    in_syscall: bool,
+    saved_result: i64,
+}
 
 pub fn run_with_interceptor<L: Linux>(cmd: &str, args: &[&str], mut handler: L) {
     match unsafe { fork() } {
@@ -27,15 +33,13 @@ pub fn run_with_interceptor<L: Linux>(cmd: &str, args: &[&str], mut handler: L) 
     }
 }
 
-fn waitpid_with_timeout(child: Pid) -> WaitStatus {
+fn wait_any_with_timeout() -> WaitStatus {
     let start = std::time::Instant::now();
     loop {
-        match waitpid(child, Some(nix::sys::wait::WaitPidFlag::WNOHANG)).expect("Wait failed") {
+        match waitpid(Pid::from_raw(-1), Some(nix::sys::wait::WaitPidFlag::WNOHANG)).expect("Wait failed") {
             WaitStatus::StillAlive => {
-                if start.elapsed().as_secs() >= 1 {
-                    eprintln!("Child process timed out, killing...");
-                    let _ = nix::sys::signal::kill(child, nix::sys::signal::Signal::SIGKILL);
-                    panic!("Child process timed out");
+                if start.elapsed().as_secs() >= 5 { // Increased timeout for multi-process bash
+                    panic!("Process group timed out");
                 }
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
@@ -44,56 +48,92 @@ fn waitpid_with_timeout(child: Pid) -> WaitStatus {
     }
 }
 
-fn parent_loop<L: Linux>(child: Pid, handler: &mut L) {
-    // Initial wait
-    waitpid_with_timeout(child);
+fn parent_loop<L: Linux>(initial_child: Pid, handler: &mut L) {
+    // Initial wait for exec stop
+    waitpid(initial_child, None).expect("Initial wait failed");
     
     // Disable vDSO before we start tracing syscalls
-    let regs = ptrace::getregs(child).expect("Failed to get regs for vDSO disable");
-    vdso::disable_vdso(child, regs.rsp);
+    let regs = ptrace::getregs(initial_child).expect("Failed to get regs for vDSO disable");
+    vdso::disable_vdso(initial_child, regs.rsp);
 
-    ptrace::setoptions(child, ptrace::Options::PTRACE_O_TRACESYSGOOD).expect("Failed to set options");
+    let options = ptrace::Options::PTRACE_O_TRACESYSGOOD |
+                  ptrace::Options::PTRACE_O_TRACEFORK |
+                  ptrace::Options::PTRACE_O_TRACEVFORK |
+                  ptrace::Options::PTRACE_O_TRACECLONE |
+                  ptrace::Options::PTRACE_O_TRACEEXEC; // Also trace exec to disable vdso again if needed
+    ptrace::setoptions(initial_child, options).expect("Failed to set options");
 
-    let mut in_syscall = false;
-    let mut saved_result: i64 = 0;
+    let mut tracees: HashMap<Pid, ChildState> = HashMap::new();
+    tracees.insert(initial_child, ChildState { in_syscall: false, saved_result: 0 });
+
+    ptrace::syscall(initial_child, None).expect("Initial PTRACE_SYSCALL failed");
 
     loop {
-        ptrace::syscall(child, None).expect("PTRACE_SYSCALL failed");
-        
-        let status = waitpid_with_timeout(child);
+        if tracees.is_empty() { break; }
+
+        let status = wait_any_with_timeout();
+        let pid = match status.pid() {
+            Some(p) => p,
+            None => continue,
+        };
 
         match status {
             WaitStatus::PtraceSyscall(_) => {
-                if !in_syscall {
+                let state = tracees.get_mut(&pid).expect("Unknown child");
+                if !state.in_syscall {
                     // Syscall Entry
-                    if let Some(res) = handle_syscall_entry(child, handler) {
-                        saved_result = res;
-                        let mut regs = ptrace::getregs(child).expect("Failed to get regs");
+                    if let Some(res) = handle_syscall_entry(pid, handler) {
+                        state.saved_result = res;
+                        let mut regs = ptrace::getregs(pid).expect("Failed to get regs");
                         regs.orig_rax = u64::MAX; // -1 as u64
-                        ptrace::setregs(child, regs).expect("Failed to set regs");
+                        ptrace::setregs(pid, regs).expect("Failed to set regs");
                     } else {
-                        saved_result = -123456; // Sentinel for "did not replace"
+                        state.saved_result = -123456; // Sentinel for "did not replace"
                     }
-                    in_syscall = true;
+                    state.in_syscall = true;
                 } else {
                     // Syscall Exit
-                    if saved_result != -123456 {
-                        let mut regs = ptrace::getregs(child).expect("Failed to get regs");
-                        regs.rax = saved_result as u64;
-                        ptrace::setregs(child, regs).expect("Failed to set regs");
+                    if state.saved_result != -123456 {
+                        let mut regs = ptrace::getregs(pid).expect("Failed to get regs");
+                        regs.rax = state.saved_result as u64;
+                        ptrace::setregs(pid, regs).expect("Failed to set regs");
                     }
-                    in_syscall = false;
+                    state.in_syscall = false;
                 }
+                ptrace::syscall(pid, None).expect("PTRACE_SYSCALL failed");
+            }
+            WaitStatus::PtraceEvent(_, _, event) => {
+                if event == ptrace::Event::PTRACE_EVENT_FORK as i32 || 
+                   event == ptrace::Event::PTRACE_EVENT_VFORK as i32 || 
+                   event == ptrace::Event::PTRACE_EVENT_CLONE as i32 {
+                    let new_pid = ptrace::getevent(pid).expect("Failed to get event msg");
+                    let new_pid = Pid::from_raw(new_pid as i32);
+                    tracees.insert(new_pid, ChildState { in_syscall: false, saved_result: 0 });
+                    // New child is created stopped. We must wait for its SIGSTOP (or similar)
+                    // which will be picked up by the main loop's waitpid.
+                    // Do NOT restart it here properly to avoid races (ESRCH if not waited yet).
+                } else if event == ptrace::Event::PTRACE_EVENT_EXEC as i32 {
+                    // After exec, we might need to disable vDSO again?
+                    // Usually vDSO is mapped to the same place, but auxv might change.
+                    let regs = ptrace::getregs(pid).expect("Failed to get regs after exec");
+                    vdso::disable_vdso(pid, regs.rsp);
+                }
+                ptrace::syscall(pid, None).expect("PTRACE_SYSCALL failed after event");
             }
             WaitStatus::Exited(_, status) => {
-                println!("Child exited with status {}", status);
-                break;
+                println!("Child {} exited with status {}", pid, status);
+                tracees.remove(&pid);
             }
             WaitStatus::Signaled(_, sig, _) => {
-                println!("Child signaled with {}", sig);
-                break;
+                println!("Child {} signaled with {}", pid, sig);
+                tracees.remove(&pid);
             }
-            _other => {}
+            _other => {
+                // If stopped for other reasons (signals etc), just continue
+                if status.pid().is_some() {
+                    let _ = ptrace::syscall(pid, None);
+                }
+            }
         }
     }
 }
@@ -188,12 +228,30 @@ fn handle_syscall_entry<L: Linux>(pid: Pid, handler: &mut L) -> Option<i64> {
         Some(Sysno::exit) => {
             let status = regs.rdi as i32;
             handler.exit(status);
-            Some(0)
+            None // Passthru: let the child actually exit!
         }
         Some(Sysno::exit_group) => {
             let status = regs.rdi as i32;
             handler.exit_group(status);
-            Some(0)
+            None // Passthru: let the child actually exit!
+        }
+        Some(Sysno::fork) => {
+            handler.fork();
+            None
+        }
+        Some(Sysno::vfork) => {
+            handler.vfork();
+            None
+        }
+        Some(Sysno::clone) => {
+            let flags = regs.rdi as i32;
+            handler.clone(flags);
+            None
+        }
+        Some(Sysno::clone3) => {
+            // Mapping clone3 to clone for logging
+            handler.clone(0);
+            None
         }
         _ => None,
     }

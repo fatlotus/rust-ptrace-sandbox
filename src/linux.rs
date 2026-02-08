@@ -14,4 +14,7 @@ pub trait Linux {
     fn exit_group(&mut self, status: c_int);
     fn brk(&mut self, addr: *mut c_void) -> *mut c_void;
     fn clock_gettime(&mut self, clk_id: libc::clockid_t) -> c_int;
+    fn fork(&mut self) -> nix::unistd::Pid;
+    fn vfork(&mut self) -> nix::unistd::Pid;
+    fn clone(&mut self, flags: c_int) -> nix::unistd::Pid;
 }
