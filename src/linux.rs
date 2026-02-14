@@ -4,6 +4,10 @@ use crate::captured::CapturedProcess;
 pub trait Linux<Fd> {
     /// Get default file descriptors for stdin, stdout, stderr
     fn default_fds(&mut self) -> (Fd, Fd, Fd);
+    
+    /// Create a new Fd object for the same underlying file descriptor.
+    /// Used for fork/clone where child inherits file descriptors.
+    fn dup_fd(&mut self, fd: &Fd) -> Fd;
 
     /// write - write to a file descriptor
     ///

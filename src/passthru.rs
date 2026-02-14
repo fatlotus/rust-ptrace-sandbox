@@ -16,6 +16,10 @@ impl Linux<PassthruFd> for Passthru {
     fn default_fds(&mut self) -> (PassthruFd, PassthruFd, PassthruFd) {
         (PassthruFd(0), PassthruFd(1), PassthruFd(2))
     }
+    
+    fn dup_fd(&mut self, fd: &PassthruFd) -> PassthruFd {
+        PassthruFd(fd.0)
+    }
 
     fn write(&mut self, proc: &CapturedProcess, fd: &mut PassthruFd, buf: &[u8]) -> nix::Result<usize> {
         let regs = proc.get_regs()?;

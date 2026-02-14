@@ -207,13 +207,13 @@ where
                     let _ = ptrace::detach(new_pid, Some(nix::sys::signal::Signal::SIGSTOP));
 
                     let mut child_handler = state.pending_child_handler.take().expect("No pending handler for fork");
-                    // After fork, child inherits the same FDs, but we need new Fd objects
-                    // Get default fds for the child
+                    // After fork, child inherits all file descriptors from parent
+                    // Duplicate all parent fds for the child
                     let mut child_fd_map = HashMap::new();
-                    let (stdin, stdout, stderr) = child_handler.default_fds();
-                    child_fd_map.insert(0, stdin);
-                    child_fd_map.insert(1, stdout);
-                    child_fd_map.insert(2, stderr);
+                    for (guest_fd, parent_fd) in &state.fd_map {
+                        let child_fd = child_handler.dup_fd(parent_fd);
+                        child_fd_map.insert(*guest_fd, child_fd);
+                    }
                     let child_next_fd = state.next_fd;
                     std::thread::spawn(move || {
                         tracee_loop(new_pid, child_handler, child_fd_map, child_next_fd, false);
