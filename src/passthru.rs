@@ -389,6 +389,82 @@ impl Linux<PassthruFd> for Passthru {
         Ok(res as usize)
     }
 
+    fn gettimeofday(&mut self, proc: &CapturedProcess) -> nix::Result<c_int> {
+        let regs = proc.get_regs()?;
+        let res = proc.gettimeofday(regs.rdi, regs.rsi)?;
+        if self.verbose {
+            println!("gettimeofday(..., ...) = {}", res);
+        }
+        Ok(res as c_int)
+    }
+
+    fn getppid(&mut self, proc: &CapturedProcess) -> nix::Result<c_int> {
+        let res = proc.getppid()?;
+        if self.verbose {
+            println!("getppid() = {}", res);
+        }
+        Ok(res as c_int)
+    }
+
+    fn getpgrp(&mut self, proc: &CapturedProcess) -> nix::Result<c_int> {
+        let res = proc.getpgrp()?;
+        if self.verbose {
+            println!("getpgrp() = {}", res);
+        }
+        Ok(res as c_int)
+    }
+
+    fn uname(&mut self, proc: &CapturedProcess) -> nix::Result<c_int> {
+        let regs = proc.get_regs()?;
+        let res = proc.uname(regs.rdi)?;
+        if self.verbose {
+            println!("uname(...) = {}", res);
+        }
+        Ok(res as c_int)
+    }
+
+    fn sysinfo(&mut self, proc: &CapturedProcess) -> nix::Result<c_int> {
+        let regs = proc.get_regs()?;
+        let res = proc.sysinfo(regs.rdi)?;
+        if self.verbose {
+            println!("sysinfo(...) = {}", res);
+        }
+        Ok(res as c_int)
+    }
+
+    fn getgid(&mut self, proc: &CapturedProcess) -> nix::Result<c_int> {
+        let res = proc.getgid()?;
+        if self.verbose {
+            println!("getgid() = {}", res);
+        }
+        Ok(res as c_int)
+    }
+
+    fn getegid(&mut self, proc: &CapturedProcess) -> nix::Result<c_int> {
+        let res = proc.getegid()?;
+        if self.verbose {
+            println!("getegid() = {}", res);
+        }
+        Ok(res as c_int)
+    }
+
+    fn times(&mut self, proc: &CapturedProcess) -> nix::Result<c_int> {
+        let regs = proc.get_regs()?;
+        let res = proc.times(regs.rdi)?;
+        if self.verbose {
+            println!("times(...) = {}", res);
+        }
+        Ok(res as c_int)
+    }
+
+    fn writev(&mut self, proc: &CapturedProcess, fd: &mut PassthruFd, iov: u64, iovcnt: i32) -> nix::Result<usize> {
+        let res = proc.writev(fd.0, iov, iovcnt)?;
+        if self.verbose {
+            println!("writev({}, ..., {}) = {}", fd.0, iovcnt, res);
+        }
+        Ok(res as usize)
+    }
+
     fn is_verbose(&self) -> bool {
         self.verbose
     }

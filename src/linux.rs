@@ -158,6 +158,33 @@ pub trait Linux<Fd> {
     /// getrandom - obtain a series of random bytes
     fn getrandom(&mut self, proc: &CapturedProcess, buf: &mut [u8], flags: i32) -> nix::Result<usize>;
 
+    /// gettimeofday - get time
+    fn gettimeofday(&mut self, proc: &CapturedProcess) -> nix::Result<c_int>;
+
+    /// getppid - get parent process identification
+    fn getppid(&mut self, proc: &CapturedProcess) -> nix::Result<c_int>;
+
+    /// getpgrp - get process group
+    fn getpgrp(&mut self, proc: &CapturedProcess) -> nix::Result<c_int>;
+
+    /// uname - get name and information about current kernel
+    fn uname(&mut self, proc: &CapturedProcess) -> nix::Result<c_int>;
+
+    /// sysinfo - return system information
+    fn sysinfo(&mut self, proc: &CapturedProcess) -> nix::Result<c_int>;
+
+    /// getgid - get group identification
+    fn getgid(&mut self, proc: &CapturedProcess) -> nix::Result<c_int>;
+
+    /// getegid - get effective group identification
+    fn getegid(&mut self, proc: &CapturedProcess) -> nix::Result<c_int>;
+
+    /// times - get process times
+    fn times(&mut self, proc: &CapturedProcess) -> nix::Result<c_int>;
+
+    /// writev - write data from multiple buffers
+    fn writev(&mut self, proc: &CapturedProcess, fd: &mut Fd, iov: u64, iovcnt: i32) -> nix::Result<usize>;
+
     /// is_verbose - check if verbose logging is enabled
     fn is_verbose(&self) -> bool;
 }

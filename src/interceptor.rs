@@ -43,6 +43,15 @@ where
         }
         Ok(ForkResult::Child) => {
             ptrace::traceme().expect("Failed to traceme");
+            
+            // Disable ASLR for the child process to improve determinism
+            unsafe {
+                let current = libc::personality(0xffffffff);
+                if current != -1 {
+                    libc::personality(current as u64 | libc::ADDR_NO_RANDOMIZE as u64);
+                }
+            }
+
             let c_cmd = CString::new(cmd).unwrap();
             let mut c_args: Vec<CString> = Vec::new();
             c_args.push(c_cmd.clone());
@@ -681,6 +690,75 @@ where
                 Ok(res) => Some(res as i64),
                 Err(err) => Some(-(err as i32) as i64),
             }
+        }
+        Some(Sysno::getgid) => {
+            match handler.getgid(&proc) {
+                Ok(res) => Some(res as i64),
+                Err(err) => Some(-(err as i32) as i64),
+            }
+        }
+        Some(Sysno::getegid) => {
+            match handler.getegid(&proc) {
+                Ok(res) => Some(res as i64),
+                Err(err) => Some(-(err as i32) as i64),
+            }
+        }
+        Some(Sysno::getppid) => {
+            match handler.getppid(&proc) {
+                Ok(res) => Some(res as i64),
+                Err(err) => Some(-(err as i32) as i64),
+            }
+        }
+        Some(Sysno::getpgrp) => {
+            match handler.getpgrp(&proc) {
+                Ok(res) => Some(res as i64),
+                Err(err) => Some(-(err as i32) as i64),
+            }
+        }
+        Some(Sysno::gettimeofday) => {
+            match handler.gettimeofday(&proc) {
+                Ok(res) => Some(res as i64),
+                Err(err) => Some(-(err as i32) as i64),
+            }
+        }
+        Some(Sysno::uname) => {
+            match handler.uname(&proc) {
+                Ok(res) => Some(res as i64),
+                Err(err) => Some(-(err as i32) as i64),
+            }
+        }
+        Some(Sysno::sysinfo) => {
+            match handler.sysinfo(&proc) {
+                Ok(res) => Some(res as i64),
+                Err(err) => Some(-(err as i32) as i64),
+            }
+        }
+        Some(Sysno::times) => {
+            match handler.times(&proc) {
+                Ok(res) => Some(res as i64),
+                Err(err) => Some(-(err as i32) as i64),
+            }
+        }
+        Some(Sysno::writev) => {
+            if let Some(fd) = get_fd_mut(state, regs.rdi as i32) {
+                let iov = regs.rsi as u64;
+                let iovcnt = regs.rdx as i32;
+                match handler.writev(&proc, fd, iov, iovcnt) {
+                    Ok(res) => Some(res as i64),
+                    Err(err) => Some(-(err as i32) as i64),
+                }
+            } else {
+                Some(-libc::EBADF as i64)
+            }
+        }
+        Some(Sysno::rt_sigprocmask) => {
+            // Let it fall through to the kernel.
+            // We handle it here just to avoid the "unknown system call" message.
+            None
+        }
+        Some(Sysno::rt_sigaction) => {
+            // Let it fall through to the kernel.
+            None
         }
         Some(Sysno::getrandom) => {
             let buf_addr = regs.rdi as usize;

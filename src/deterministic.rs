@@ -13,6 +13,22 @@ impl Deterministic {
             passthru: Passthru::new(verbose),
         }
     }
+
+    fn patch_stat(&self, proc: &CapturedProcess, addr: usize) {
+        // struct stat on x86_64:
+        // atime (72..88), mtime (88..104), ctime (104..120)
+        
+        let mut bytes = proc.read_memory(addr, 120); // Only need up to ctime
+        if bytes.len() < 120 { return; }
+        
+        // Zero out timestamps (atim 72..88, mtim 88..104, ctim 104..120)
+        for i in 72..120 { bytes[i] = 0; }
+        
+        proc.write_memory(addr, &bytes);
+        if self.passthru.verbose {
+            println!("path_stat({:#x}) (DETERMINISTIC)", addr);
+        }
+    }
 }
 
 impl Linux<PassthruFd> for Deterministic {
@@ -45,11 +61,21 @@ impl Linux<PassthruFd> for Deterministic {
     }
 
     fn fstat(&mut self, proc: &CapturedProcess, fd: &mut PassthruFd) -> nix::Result<c_int> {
-        self.passthru.fstat(proc, fd)
+        let regs = proc.get_regs()?;
+        let res = self.passthru.fstat(proc, fd)?;
+        if res == 0 {
+            self.patch_stat(proc, regs.rsi as usize);
+        }
+        Ok(res)
     }
 
     fn newfstatat(&mut self, proc: &CapturedProcess, dirfd: Option<&mut PassthruFd>, pathname: &str, flags: c_int) -> nix::Result<c_int> {
-        self.passthru.newfstatat(proc, dirfd, pathname, flags)
+        let regs = proc.get_regs()?;
+        let res = self.passthru.newfstatat(proc, dirfd, pathname, flags)?;
+        if res == 0 {
+            self.patch_stat(proc, regs.rdx as usize);
+        }
+        Ok(res)
     }
 
     fn mmap(&mut self, proc: &CapturedProcess, addr: *mut c_void, length: usize, prot: c_int, flags: c_int, fd: Option<&mut PassthruFd>, offset: off_t) -> nix::Result<*mut c_void> {
@@ -184,16 +210,25 @@ impl Linux<PassthruFd> for Deterministic {
         self.passthru.getcwd(proc, size)
     }
 
-    fn getpid(&mut self, proc: &CapturedProcess) -> nix::Result<c_int> {
-        self.passthru.getpid(proc)
+    fn getpid(&mut self, _proc: &CapturedProcess) -> nix::Result<c_int> {
+        if self.passthru.verbose {
+            println!("getpid() = 1234 (DETERMINISTIC)");
+        }
+        Ok(1234)
     }
 
-    fn getuid(&mut self, proc: &CapturedProcess) -> nix::Result<c_int> {
-        self.passthru.getuid(proc)
+    fn getuid(&mut self, _proc: &CapturedProcess) -> nix::Result<c_int> {
+        if self.passthru.verbose {
+            println!("getuid() = 1000 (DETERMINISTIC)");
+        }
+        Ok(1000)
     }
 
-    fn geteuid(&mut self, proc: &CapturedProcess) -> nix::Result<c_int> {
-        self.passthru.geteuid(proc)
+    fn geteuid(&mut self, _proc: &CapturedProcess) -> nix::Result<c_int> {
+        if self.passthru.verbose {
+            println!("geteuid() = 1000 (DETERMINISTIC)");
+        }
+        Ok(1000)
     }
 
     fn getrandom(&mut self, _proc: &CapturedProcess, buf: &mut [u8], _flags: c_int) -> nix::Result<usize> {
@@ -204,6 +239,81 @@ impl Linux<PassthruFd> for Deterministic {
             println!("getrandom(..., {}, ...) = {} (DETERMINISTIC)", buf.len(), buf.len());
         }
         Ok(buf.len())
+    }
+
+    fn gettimeofday(&mut self, proc: &CapturedProcess) -> nix::Result<c_int> {
+        let regs = proc.get_regs()?;
+        let tv_addr = regs.rdi as usize;
+        
+        // Return a fixed timestamp: 2000-01-01 00:00:00 UTC
+        let tv_sec: i64 = 946684800;
+        let tv_usec: i64 = 0;
+        
+        let mut bytes = Vec::with_capacity(16);
+        bytes.extend_from_slice(&tv_sec.to_ne_bytes());
+        bytes.extend_from_slice(&tv_usec.to_ne_bytes());
+        
+        proc.write_memory(tv_addr, &bytes);
+        
+        if self.passthru.verbose {
+            println!("gettimeofday(..., ...) = 0 (DETERMINISTIC)");
+        }
+        Ok(0)
+    }
+
+    fn getppid(&mut self, _proc: &CapturedProcess) -> nix::Result<c_int> {
+        if self.passthru.verbose {
+            println!("getppid() = 1 (DETERMINISTIC)");
+        }
+        Ok(1)
+    }
+
+    fn getpgrp(&mut self, _proc: &CapturedProcess) -> nix::Result<c_int> {
+        if self.passthru.verbose {
+            println!("getpgrp() = 1 (DETERMINISTIC)");
+        }
+        Ok(1)
+    }
+
+    fn uname(&mut self, proc: &CapturedProcess) -> nix::Result<c_int> {
+        self.passthru.uname(proc)
+    }
+
+    fn sysinfo(&mut self, proc: &CapturedProcess) -> nix::Result<c_int> {
+        self.passthru.sysinfo(proc)
+    }
+
+    fn getgid(&mut self, _proc: &CapturedProcess) -> nix::Result<c_int> {
+        if self.passthru.verbose {
+            println!("getgid() = 1000 (DETERMINISTIC)");
+        }
+        Ok(1000)
+    }
+
+    fn getegid(&mut self, _proc: &CapturedProcess) -> nix::Result<c_int> {
+        if self.passthru.verbose {
+            println!("getegid() = 1000 (DETERMINISTIC)");
+        }
+        Ok(1000)
+    }
+
+    fn times(&mut self, proc: &CapturedProcess) -> nix::Result<c_int> {
+        let regs = proc.get_regs()?;
+        let addr = regs.rdi as usize;
+        let res = self.passthru.times(proc)?;
+        if res != -1 {
+            // Zero out the tms struct (4 fields of 8 bytes)
+            let buf = vec![0u8; 32];
+            proc.write_memory(addr, &buf);
+        }
+        if self.passthru.verbose {
+            println!("times(...) = 0 (DETERMINISTIC)");
+        }
+        Ok(0) // Return 0 ticks
+    }
+
+    fn writev(&mut self, proc: &CapturedProcess, fd: &mut PassthruFd, iov: u64, iovcnt: i32) -> nix::Result<usize> {
+        self.passthru.writev(proc, fd, iov, iovcnt)
     }
 
     fn is_verbose(&self) -> bool {

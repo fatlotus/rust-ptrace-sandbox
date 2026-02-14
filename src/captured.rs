@@ -225,7 +225,43 @@ impl CapturedProcess {
         self.syscall(libc::SYS_geteuid as u64, 0, 0, 0, 0, 0, 0)
     }
 
+    pub fn getgid(&self) -> Result<i64> {
+        self.syscall(libc::SYS_getgid as u64, 0, 0, 0, 0, 0, 0)
+    }
+
+    pub fn getegid(&self) -> Result<i64> {
+        self.syscall(libc::SYS_getegid as u64, 0, 0, 0, 0, 0, 0)
+    }
+
     pub fn getrandom(&self, addr: u64, count: usize, flags: c_int) -> Result<i64> {
         self.syscall(libc::SYS_getrandom as u64, addr, count as u64, flags as u64, 0, 0, 0)
+    }
+
+    pub fn gettimeofday(&self, tv_addr: u64, tz_addr: u64) -> Result<i64> {
+        self.syscall(libc::SYS_gettimeofday as u64, tv_addr, tz_addr, 0, 0, 0, 0)
+    }
+
+    pub fn getppid(&self) -> Result<i64> {
+        self.syscall(libc::SYS_getppid as u64, 0, 0, 0, 0, 0, 0)
+    }
+
+    pub fn getpgrp(&self) -> Result<i64> {
+        self.syscall(libc::SYS_getpgrp as u64, 0, 0, 0, 0, 0, 0)
+    }
+
+    pub fn uname(&self, addr: u64) -> Result<i64> {
+        self.syscall(libc::SYS_uname as u64, addr, 0, 0, 0, 0, 0)
+    }
+
+    pub fn sysinfo(&self, addr: u64) -> Result<i64> {
+        self.syscall(libc::SYS_sysinfo as u64, addr, 0, 0, 0, 0, 0)
+    }
+
+    pub fn times(&self, addr: u64) -> Result<i64> {
+        self.syscall(libc::SYS_times as u64, addr, 0, 0, 0, 0, 0)
+    }
+
+    pub fn writev(&self, fd: c_int, iov: u64, iovcnt: c_int) -> Result<i64> {
+        self.syscall(libc::SYS_writev as u64, fd as u64, iov, iovcnt as u64, 0, 0, 0)
     }
 }

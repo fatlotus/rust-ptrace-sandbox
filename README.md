@@ -23,10 +23,19 @@ cargo run --bin=ptrace -- /bin/cat Cargo.toml
 
 ### Sandbox Mode (Deterministic)
 
-You can enable a deterministic sandbox mode with the `--sandbox` flag. In this mode, system calls related to time and randomness return fixed, predictable values:
+You can enable a deterministic sandbox mode with the `--sandbox` flag. In this mode, system calls return fixed, predictable values to ensure reproducible execution. This is particularly useful for programs like `bash` that use various sources of entropy for things like `$RANDOM`.
+
+Features made deterministic in sandbox mode:
+- **Time**: `gettimeofday`, `clock_gettime`, `times`.
+- **Identity**: `getpid`, `getppid`, `getpgrp`, `getuid`, `geteuid`, `getgid`, `getegid`.
+- **Randomness**: `getrandom` returns a fixed byte pattern.
+- **File Metadata**: `fstat` and `newfstatat` zero out timestamps to remove file modification time entropy.
+- **System Info**: `uname` and `sysinfo`.
+- **ASLR**: Disables Address Space Layout Randomization (ASLR) in the child process using `personality(ADDR_NO_RANDOMIZE)`.
 
 ```bash
-cargo run --bin=ptrace -- --sandbox /bin/date
+cargo run --bin=ptrace -- --sandbox /bin/bash -c 'echo $RANDOM'
+```
 cargo run --bin=ptrace -- --sandbox target/debug/random_gen
 ```
 
