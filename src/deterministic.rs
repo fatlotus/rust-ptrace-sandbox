@@ -76,9 +76,9 @@ impl Linux<PassthruFd> for Deterministic {
         let regs = proc.get_regs()?;
         let tp_addr = regs.rsi as usize;
         
-        // Return a fixed timestamp: 2026-02-14 23:11:45 UTC
-        // Unix timestamp for 2026-02-14 23:11:45 is 1771024305
-        let tv_sec: i64 = 1771024305;
+        // Return a fixed timestamp: 2000-01-01 00:00:00 UTC
+        // Unix timestamp for 2000-01-01 00:00:00 is 946684800
+        let tv_sec: i64 = 946684800;
         let tv_nsec: i64 = 0;
         
         let mut bytes = Vec::with_capacity(16);

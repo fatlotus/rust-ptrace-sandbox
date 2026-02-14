@@ -38,10 +38,10 @@ fn test_date_sandbox() {
     println!("STDERR: {}", stderr);
 
     assert!(output.status.success());
-    // Fixed timestamp: 1771024305 is Sat Feb 14 23:11:45 UTC 2026
-    // date command output format varies, but it should contain "Feb 14" and "23:11:45" and "2026"
-    assert!(stdout.contains("2026"));
-    assert!(stdout.contains("Feb"));
-    assert!(stdout.contains("14"));
-    assert!(stdout.contains("23:11:45"));
+    // Fixed timestamp: 946684800 is Sat Jan  1 00:00:00 UTC 2000
+    // date command output format varies, but it should contain "Jan  1" and "00:00:00" and "2000"
+    assert!(stdout.contains("2000"));
+    assert!(stdout.contains("Jan"));
+    assert!(stdout.contains("1"));
+    assert!(stdout.contains("00:00:00"));
 }
