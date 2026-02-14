@@ -11,27 +11,31 @@ Make it possible to implement all system calls of a target process using safe Ru
 You can run commands like `echo`, `date`, and `cat` under the ptrace sandbox:
 
 ```bash
-cargo run -- /bin/echo "hello world"
-cargo run -- /bin/date
-cargo run -- /bin/cat Cargo.toml
+cargo run --bin=ptrace -- /bin/echo "hello world"
+cargo run --bin=ptrace -- /bin/date
+cargo run --bin=ptrace -- /bin/cat Cargo.toml
 ```
+
+### Options
+
+- `--sandbox`: Enable deterministic mode (fixed time and randomness).
+- `--verbose`: Print all intercepted system calls and their results.
 
 ### Sandbox Mode (Deterministic)
 
 You can enable a deterministic sandbox mode with the `--sandbox` flag. In this mode, system calls related to time and randomness return fixed, predictable values:
 
 ```bash
-cargo run -- --sandbox /bin/date
-cargo run -- --sandbox target/debug/random_gen
+cargo run --bin=ptrace -- --sandbox /bin/date
+cargo run --bin=ptrace -- --sandbox target/debug/random_gen
 ```
 
-The output will show the intercepted system calls and their results:
+### Verbose Mode
 
-```
-openat(AT_FDCWD, "Cargo.toml", O_RDONLY, 0) = 3
-read(3, ..., 8192) = 181
-write(1, "...", 181) = 181
-close(3) = 0
+By default, debugging output is hidden. Use the `--verbose` flag to see the intercepted system calls:
+
+```bash
+cargo run --bin=ptrace -- --verbose /bin/echo "hello world"
 ```
 
 ## Code Layout

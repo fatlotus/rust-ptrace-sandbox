@@ -4,6 +4,7 @@ use std::process::Command;
 fn test_date() {
     let ptrace_bin = env!("CARGO_BIN_EXE_ptrace");
     let output = Command::new(ptrace_bin)
+        .arg("--verbose")
         .arg("/bin/date")
         .output()
         .expect("Failed to execute ptrace bin");

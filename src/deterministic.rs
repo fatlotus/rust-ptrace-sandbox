@@ -8,9 +8,9 @@ pub struct Deterministic {
 }
 
 impl Deterministic {
-    pub fn new() -> Self {
+    pub fn new(verbose: bool) -> Self {
         Self {
-            passthru: Passthru,
+            passthru: Passthru::new(verbose),
         }
     }
 }
@@ -87,23 +87,25 @@ impl Linux<PassthruFd> for Deterministic {
         
         proc.write_memory(tp_addr, &bytes);
         
-        println!("clock_gettime({}, ...) = 0 (DETERMINISTIC)", clk_id);
+        if self.passthru.verbose {
+            println!("clock_gettime({}, ...) = 0 (DETERMINISTIC)", clk_id);
+        }
         Ok(0)
     }
 
     fn fork(&mut self, proc: &CapturedProcess) -> nix::Result<(nix::unistd::Pid, Box<dyn Linux<PassthruFd> + Send>)> {
         let (pid, _) = self.passthru.fork(proc)?;
-        Ok((pid, Box::new(Deterministic::new())))
+        Ok((pid, Box::new(Deterministic::new(self.passthru.verbose))))
     }
 
     fn vfork(&mut self, proc: &CapturedProcess) -> nix::Result<(nix::unistd::Pid, Box<dyn Linux<PassthruFd> + Send>)> {
         let (pid, _) = self.passthru.vfork(proc)?;
-        Ok((pid, Box::new(Deterministic::new())))
+        Ok((pid, Box::new(Deterministic::new(self.passthru.verbose))))
     }
 
     fn clone(&mut self, proc: &CapturedProcess, flags: c_int) -> nix::Result<(nix::unistd::Pid, Box<dyn Linux<PassthruFd> + Send>)> {
         let (pid, _) = self.passthru.clone(proc, flags)?;
-        Ok((pid, Box::new(Deterministic::new())))
+        Ok((pid, Box::new(Deterministic::new(self.passthru.verbose))))
     }
 
     fn socket(&mut self, proc: &CapturedProcess, domain: c_int, ty: c_int, protocol: c_int) -> nix::Result<PassthruFd> {
@@ -198,7 +200,9 @@ impl Linux<PassthruFd> for Deterministic {
         for i in 0..buf.len() {
             buf[i] = 0x42;
         }
-        println!("getrandom(..., {}, ...) = {} (DETERMINISTIC)", buf.len(), buf.len());
+        if self.passthru.verbose {
+            println!("getrandom(..., {}, ...) = {} (DETERMINISTIC)", buf.len(), buf.len());
+        }
         Ok(buf.len())
     }
 }

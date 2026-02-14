@@ -4,6 +4,7 @@ use std::process::Command;
 fn test_echo() {
     let ptrace_bin = env!("CARGO_BIN_EXE_ptrace");
     let output = Command::new(ptrace_bin)
+        .arg("--verbose")
         .arg("/bin/echo")
         .arg("hello world")
         .output()

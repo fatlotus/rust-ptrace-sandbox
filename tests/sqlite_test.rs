@@ -13,6 +13,7 @@ fn test_sqlite() {
     let sql_commands = "CREATE TABLE test (id INTEGER PRIMARY KEY, content TEXT); INSERT INTO test (content) VALUES ('hello sqlite'); SELECT content FROM test;";
 
     let output = Command::new(ptrace_bin)
+        .arg("--verbose")
         .arg("sqlite3")
         .arg(db_file)
         .arg(sql_commands)

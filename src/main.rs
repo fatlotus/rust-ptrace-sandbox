@@ -12,27 +12,41 @@ use interceptor::run_with_interceptor;
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
-        eprintln!("Usage: {} [--sandbox] <command> [args...]", args[0]);
+        print_usage(&args[0]);
         std::process::exit(1);
     }
 
-    let (cmd, cmd_args, sandbox) = if args[1] == "--sandbox" {
-        if args.len() < 3 {
-            eprintln!("Usage: {} [--sandbox] <command> [args...]", args[0]);
-            std::process::exit(1);
+    let mut sandbox = false;
+    let mut verbose = false;
+    let mut cmd_start_idx = 1;
+
+    for i in 1..args.len() {
+        if args[i] == "--sandbox" {
+            sandbox = true;
+            cmd_start_idx = i + 1;
+        } else if args[i] == "--verbose" {
+            verbose = true;
+            cmd_start_idx = i + 1;
+        } else {
+            break;
         }
-        let cmd = &args[2];
-        let cmd_args: Vec<&str> = args[3..].iter().map(|s| s.as_str()).collect();
-        (cmd, cmd_args, true)
-    } else {
-        let cmd = &args[1];
-        let cmd_args: Vec<&str> = args[2..].iter().map(|s| s.as_str()).collect();
-        (cmd, cmd_args, false)
-    };
+    }
+
+    if cmd_start_idx >= args.len() {
+        print_usage(&args[0]);
+        std::process::exit(1);
+    }
+
+    let cmd = &args[cmd_start_idx];
+    let cmd_args: Vec<&str> = args[cmd_start_idx + 1..].iter().map(|s| s.as_str()).collect();
 
     if sandbox {
-        run_with_interceptor(cmd, &cmd_args, Deterministic::new());
+        run_with_interceptor(cmd, &cmd_args, Deterministic::new(verbose));
     } else {
-        run_with_interceptor(cmd, &cmd_args, Passthru);
+        run_with_interceptor(cmd, &cmd_args, Passthru::new(verbose));
     }
+}
+
+fn print_usage(program: &str) {
+    eprintln!("Usage: {} [--sandbox] [--verbose] <command> [args...]", program);
 }

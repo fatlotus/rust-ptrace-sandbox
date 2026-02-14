@@ -8,6 +8,7 @@ fn test_cat() {
     fs::write(test_file, "meow world").expect("Failed to write test file");
 
     let output = Command::new(ptrace_bin)
+        .arg("--verbose")
         .arg("/bin/cat")
         .arg(test_file)
         .output()

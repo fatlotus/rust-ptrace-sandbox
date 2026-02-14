@@ -6,6 +6,7 @@ fn test_networking() {
     let networking_bin = env!("CARGO_BIN_EXE_networking_test");
 
     let output = Command::new(ptrace_bin)
+        .arg("--verbose")
         .arg(networking_bin)
         .output()
         .expect("Failed to execute ptrace bin");

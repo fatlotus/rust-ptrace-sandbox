@@ -4,6 +4,7 @@ use std::process::Command;
 fn test_fork() {
     let ptrace_bin = env!("CARGO_BIN_EXE_ptrace");
     let output = Command::new(ptrace_bin)
+        .arg("--verbose")
         .arg("/bin/bash")
         .arg("-c")
         .arg("/bin/echo hello from fork")
