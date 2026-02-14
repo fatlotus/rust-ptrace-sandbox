@@ -26,7 +26,7 @@ struct ChildState<Fd> {
 
 pub fn run_with_interceptor<Fd, L>(cmd: &str, args: &[&str], handler: L)
 where
-    Fd: Clone + Copy + std::fmt::Debug + Send + 'static + From<i32> + std::os::unix::io::AsRawFd,
+    Fd: Send + 'static + std::os::unix::io::AsRawFd,
     L: Linux<Fd> + Send + 'static,
 {
     match unsafe { fork() } {
@@ -80,20 +80,21 @@ fn wait_pid_with_timeout(pid: Pid) -> WaitStatus {
     }
 }
 
-fn parent_loop<Fd>(initial_child: Pid, handler: Box<dyn Linux<Fd> + Send>)
+fn parent_loop<Fd>(initial_child: Pid, mut handler: Box<dyn Linux<Fd> + Send>)
 where
-    Fd: Clone + Copy + std::fmt::Debug + Send + 'static + From<i32> + std::os::unix::io::AsRawFd,
+    Fd: Send + 'static + std::os::unix::io::AsRawFd,
 {
     let mut fd_map = HashMap::new();
-    fd_map.insert(0, Fd::from(0));
-    fd_map.insert(1, Fd::from(1));
-    fd_map.insert(2, Fd::from(2));
+    let (stdin, stdout, stderr) = handler.default_fds();
+    fd_map.insert(0, stdin);
+    fd_map.insert(1, stdout);
+    fd_map.insert(2, stderr);
     tracee_loop(initial_child, handler, fd_map, 10000, true);
 }
 
 fn tracee_loop<Fd>(pid: Pid, mut handler: Box<dyn Linux<Fd> + Send>, fd_map: HashMap<c_int, Fd>, next_fd: c_int, is_initial: bool)
 where
-    Fd: Clone + Copy + std::fmt::Debug + Send + 'static + From<i32> + std::os::unix::io::AsRawFd,
+    Fd: Send + 'static + std::os::unix::io::AsRawFd,
 {
     if is_initial {
         // Initial wait for exec stop
@@ -205,8 +206,14 @@ where
                     // Handover: detach from this thread so another can attach.
                     let _ = ptrace::detach(new_pid, Some(nix::sys::signal::Signal::SIGSTOP));
 
-                    let child_handler = state.pending_child_handler.take().expect("No pending handler for fork");
-                    let child_fd_map = state.fd_map.clone();
+                    let mut child_handler = state.pending_child_handler.take().expect("No pending handler for fork");
+                    // After fork, child inherits the same FDs, but we need new Fd objects
+                    // Get default fds for the child
+                    let mut child_fd_map = HashMap::new();
+                    let (stdin, stdout, stderr) = child_handler.default_fds();
+                    child_fd_map.insert(0, stdin);
+                    child_fd_map.insert(1, stdout);
+                    child_fd_map.insert(2, stderr);
                     let child_next_fd = state.next_fd;
                     std::thread::spawn(move || {
                         tracee_loop(new_pid, child_handler, child_fd_map, child_next_fd, false);
@@ -236,7 +243,7 @@ where
 
 fn handle_syscall_entry<Fd>(pid: Pid, handler: &mut dyn Linux<Fd>, state: &mut ChildState<Fd>) -> Option<i64>
 where
-    Fd: Clone + Copy + std::fmt::Debug + From<i32> + std::os::unix::io::AsRawFd,
+    Fd: std::os::unix::io::AsRawFd,
 {
     let proc = crate::captured::CapturedProcess::new(pid);
     let regs = proc.get_regs().expect("Failed to get regs");
@@ -245,21 +252,27 @@ where
 
     match sysno {
         Some(Sysno::read) => {
-            let fd = get_fd(state, regs.rdi as i32);
-            let count = regs.rdx as usize;
-            match handler.read(&proc, fd, count) {
-                Ok(buf) => Some(buf.len() as i64),
-                Err(err) => Some(-(err as i32) as i64),
+            if let Some(fd) = get_fd_mut(state, regs.rdi as i32) {
+                let count = regs.rdx as usize;
+                match handler.read(&proc, fd, count) {
+                    Ok(buf) => Some(buf.len() as i64),
+                    Err(err) => Some(-(err as i32) as i64),
+                }
+            } else {
+                Some(-libc::EBADF as i64)
             }
         }
         Some(Sysno::write) => {
-            let fd = get_fd(state, regs.rdi as i32);
-            let addr = regs.rsi as usize;
-            let count = regs.rdx as usize;
-            let buf = proc.read_memory(addr, count);
-            match handler.write(&proc, fd, &buf) {
-                Ok(res) => Some(res as i64),
-                Err(err) => Some(-(err as i32) as i64),
+            if let Some(fd) = get_fd_mut(state, regs.rdi as i32) {
+                let addr = regs.rsi as usize;
+                let count = regs.rdx as usize;
+                let buf = proc.read_memory(addr, count);
+                match handler.write(&proc, fd, &buf) {
+                    Ok(res) => Some(res as i64),
+                    Err(err) => Some(-(err as i32) as i64),
+                }
+            } else {
+                Some(-libc::EBADF as i64)
             }
         }
         Some(Sysno::open) => {
@@ -274,20 +287,23 @@ where
         }
         Some(Sysno::close) => {
             let guest_fd = regs.rdi as i32;
-            let fd = get_fd(state, guest_fd);
-            match handler.close(&proc, fd) {
-                Ok(res) => {
-                    state.fd_map.remove(&guest_fd);
-                    Some(res as i64)
-                },
-                Err(err) => Some(-(err as i32) as i64),
+            if let Some(fd) = take_fd(state, guest_fd) {
+                match handler.close(&proc, fd) {
+                    Ok(res) => Some(res as i64),
+                    Err(err) => Some(-(err as i32) as i64),
+                }
+            } else {
+                Some(-libc::EBADF as i64)
             }
         }
         Some(Sysno::fstat) => {
-            let fd = get_fd(state, regs.rdi as i32);
-            match handler.fstat(&proc, fd) {
-                Ok(res) => Some(res as i64),
-                Err(err) => Some(-(err as i32) as i64),
+            if let Some(fd) = get_fd_mut(state, regs.rdi as i32) {
+                match handler.fstat(&proc, fd) {
+                    Ok(res) => Some(res as i64),
+                    Err(err) => Some(-(err as i32) as i64),
+                }
+            } else {
+                Some(-libc::EBADF as i64)
             }
         }
         Some(Sysno::mmap) => {
@@ -295,9 +311,9 @@ where
             let length = regs.rsi as usize;
             let prot = regs.rdx as i32;
             let flags = regs.r10 as i32;
-            let fd = get_fd(state, regs.r8 as i32);
+            let fd_opt = get_fd_mut(state, regs.r8 as i32);
             let offset = regs.r9 as libc::off_t;
-            match handler.mmap(&proc, addr, length, prot, flags, fd, offset) {
+            match handler.mmap(&proc, addr, length, prot, flags, fd_opt, offset) {
                 Ok(res) => Some(res as i64),
                 Err(err) => Some(-(err as i32) as i64),
             }
@@ -325,22 +341,22 @@ where
             }
         }
         Some(Sysno::openat) => {
-            let dirfd = get_fd(state, regs.rdi as i32);
+            let dirfd_opt = get_fd_mut(state, regs.rdi as i32);
             let addr = regs.rsi as usize;
             let flags = regs.rdx as i32;
             let mode = regs.r10 as libc::mode_t;
             let pathname = read_string(pid, addr);
-            match handler.openat(&proc, dirfd, &pathname, flags, mode) {
+            match handler.openat(&proc, dirfd_opt, &pathname, flags, mode) {
                 Ok(res) => Some(register_fd(state, res) as i64),
                 Err(err) => Some(-(err as i32) as i64),
             }
         }
         Some(Sysno::newfstatat) => {
-            let dirfd = get_fd(state, regs.rdi as i32);
+            let dirfd_opt = get_fd_mut(state, regs.rdi as i32);
             let addr = regs.rsi as usize;
             let flags = regs.r10 as i32;
             let pathname = read_string(pid, addr);
-            match handler.newfstatat(&proc, dirfd, &pathname, flags) {
+            match handler.newfstatat(&proc, dirfd_opt, &pathname, flags) {
                 Ok(res) => Some(res as i64),
                 Err(err) => Some(-(err as i32) as i64),
             }
@@ -402,80 +418,104 @@ where
             }
         }
         Some(Sysno::bind) => {
-            let fd = get_fd(state, regs.rdi as i32);
-            let addr = regs.rsi as *const libc::sockaddr;
-            let len = regs.rdx as libc::socklen_t;
-            match handler.bind(&proc, fd, addr, len) {
-                Ok(res) => Some(res as i64),
-                Err(err) => Some(-(err as i32) as i64),
+            if let Some(fd) = get_fd_mut(state, regs.rdi as i32) {
+                let addr = regs.rsi as *const libc::sockaddr;
+                let len = regs.rdx as libc::socklen_t;
+                match handler.bind(&proc, fd, addr, len) {
+                    Ok(res) => Some(res as i64),
+                    Err(err) => Some(-(err as i32) as i64),
+                }
+            } else {
+                Some(-libc::EBADF as i64)
             }
         }
         Some(Sysno::listen) => {
-            let fd = get_fd(state, regs.rdi as i32);
-            let backlog = regs.rsi as i32;
-            match handler.listen(&proc, fd, backlog) {
-                Ok(res) => Some(res as i64),
-                Err(err) => Some(-(err as i32) as i64),
+            if let Some(fd) = get_fd_mut(state, regs.rdi as i32) {
+                let backlog = regs.rsi as i32;
+                match handler.listen(&proc, fd, backlog) {
+                    Ok(res) => Some(res as i64),
+                    Err(err) => Some(-(err as i32) as i64),
+                }
+            } else {
+                Some(-libc::EBADF as i64)
             }
         }
         Some(Sysno::accept) => {
-            let fd = get_fd(state, regs.rdi as i32);
-            let addr = regs.rsi as *mut libc::sockaddr;
-            let len = regs.rdx as *mut libc::socklen_t;
-            match handler.accept(&proc, fd, addr, len) {
-                Ok(res) => Some(register_fd(state, res) as i64),
-                Err(err) => Some(-(err as i32) as i64),
+            if let Some(fd) = get_fd_mut(state, regs.rdi as i32) {
+                let addr = regs.rsi as *mut libc::sockaddr;
+                let len = regs.rdx as *mut libc::socklen_t;
+                match handler.accept(&proc, fd, addr, len) {
+                    Ok(res) => Some(register_fd(state, res) as i64),
+                    Err(err) => Some(-(err as i32) as i64),
+                }
+            } else {
+                Some(-libc::EBADF as i64)
             }
         }
         Some(Sysno::accept4) => {
-            let fd = get_fd(state, regs.rdi as i32);
-            let addr = regs.rsi as *mut libc::sockaddr;
-            let len = regs.rdx as *mut libc::socklen_t;
-            let flags = regs.r10 as i32;
-            match handler.accept4(&proc, fd, addr, len, flags) {
-                Ok(res) => Some(register_fd(state, res) as i64),
-                Err(err) => Some(-(err as i32) as i64),
+            if let Some(fd) = get_fd_mut(state, regs.rdi as i32) {
+                let addr = regs.rsi as *mut libc::sockaddr;
+                let len = regs.rdx as *mut libc::socklen_t;
+                let flags = regs.r10 as i32;
+                match handler.accept4(&proc, fd, addr, len, flags) {
+                    Ok(res) => Some(register_fd(state, res) as i64),
+                    Err(err) => Some(-(err as i32) as i64),
+                }
+            } else {
+                Some(-libc::EBADF as i64)
             }
         }
         Some(Sysno::connect) => {
-            let fd = get_fd(state, regs.rdi as i32);
-            let addr = regs.rsi as *const libc::sockaddr;
-            let len = regs.rdx as libc::socklen_t;
-            match handler.connect(&proc, fd, addr, len) {
-                Ok(res) => Some(res as i64),
-                Err(err) => Some(-(err as i32) as i64),
+            if let Some(fd) = get_fd_mut(state, regs.rdi as i32) {
+                let addr = regs.rsi as *const libc::sockaddr;
+                let len = regs.rdx as libc::socklen_t;
+                match handler.connect(&proc, fd, addr, len) {
+                    Ok(res) => Some(res as i64),
+                    Err(err) => Some(-(err as i32) as i64),
+                }
+            } else {
+                Some(-libc::EBADF as i64)
             }
         }
         Some(Sysno::setsockopt) => {
-            let fd = get_fd(state, regs.rdi as i32);
-            let level = regs.rsi as i32;
-            let optname = regs.rdx as i32;
-            let optval = regs.r10 as *const libc::c_void;
-            let optlen = regs.r8 as libc::socklen_t;
-            match handler.setsockopt(&proc, fd, level, optname, optval, optlen) {
-                Ok(res) => Some(res as i64),
-                Err(err) => Some(-(err as i32) as i64),
+            if let Some(fd) = get_fd_mut(state, regs.rdi as i32) {
+                let level = regs.rsi as i32;
+                let optname = regs.rdx as i32;
+                let optval = regs.r10 as *const libc::c_void;
+                let optlen = regs.r8 as libc::socklen_t;
+                match handler.setsockopt(&proc, fd, level, optname, optval, optlen) {
+                    Ok(res) => Some(res as i64),
+                    Err(err) => Some(-(err as i32) as i64),
+                }
+            } else {
+                Some(-libc::EBADF as i64)
             }
         }
         Some(Sysno::getsockname) => {
-            let fd = get_fd(state, regs.rdi as i32);
-            let addr = regs.rsi as *mut libc::sockaddr;
-            let len = regs.rdx as *mut libc::socklen_t;
-            match handler.getsockname(&proc, fd, addr, len) {
-                Ok(res) => Some(res as i64),
-                Err(err) => Some(-(err as i32) as i64),
+            if let Some(fd) = get_fd_mut(state, regs.rdi as i32) {
+                let addr = regs.rsi as *mut libc::sockaddr;
+                let len = regs.rdx as *mut libc::socklen_t;
+                match handler.getsockname(&proc, fd, addr, len) {
+                    Ok(res) => Some(res as i64),
+                    Err(err) => Some(-(err as i32) as i64),
+                }
+            } else {
+                Some(-libc::EBADF as i64)
             }
         }
         Some(Sysno::pread64) => {
-            let fd = get_fd(state, regs.rdi as i32);
-            let addr = regs.rsi as usize;
-            let count = regs.rdx as usize;
-            let offset = regs.r10 as libc::off_t;
-            if let Ok(buf) = handler.pread(&proc, fd, count, offset) {
-                 write_bytes(pid, addr, &buf);
-                 Some(buf.len() as i64)
+            if let Some(fd) = get_fd_mut(state, regs.rdi as i32) {
+                let addr = regs.rsi as usize;
+                let count = regs.rdx as usize;
+                let offset = regs.r10 as libc::off_t;
+                if let Ok(buf) = handler.pread(&proc, fd, count, offset) {
+                     write_bytes(pid, addr, &buf);
+                     Some(buf.len() as i64)
+                } else {
+                     Some(-1)
+                }
             } else {
-                 Some(-1)
+                Some(-libc::EBADF as i64)
             }
         }
         Some(Sysno::poll) => {
@@ -487,65 +527,84 @@ where
             // Patch guest memory with Host FDs so the syscall works
             write_fds_to_guest(pid, fds_addr, &fds);
             
-            match handler.poll(&proc, &mut fds, timeout) {
+            let result = handler.poll(&proc, &mut fds, timeout);
+            
+            // Always restore guest FDs and fds back to the map
+            match result {
                 Ok(res) => {
                     // Write back revents
                     write_pollfds_revents(pid, fds_addr, &fds);
                     // Restore original Guest FDs
                     restore_guest_fds(pid, fds_addr, &guest_fds);
+                    // Restore fds back to the map
+                    restore_pollfds(state, &guest_fds, fds);
                     Some(res as i64)
                 },
                 Err(err) => {
                     // Restore original Guest FDs even on error
                     restore_guest_fds(pid, fds_addr, &guest_fds);
+                    // Restore fds back to the map
+                    restore_pollfds(state, &guest_fds, fds);
                     Some(-(err as i32) as i64)
                 },
             }
         }
         Some(Sysno::sendto) => {
-            let fd = get_fd(state, regs.rdi as i32);
-            let buf_addr = regs.rsi as usize;
-            let len = regs.rdx as usize;
-            let flags = regs.r10 as i32;
-            let dest_addr = regs.r8 as *const libc::sockaddr;
-            let addrlen = regs.r9 as libc::socklen_t;
-            let buf = proc.read_memory(buf_addr, len);
-            match handler.sendto(&proc, fd, &buf, flags, dest_addr, addrlen) {
-                Ok(res) => Some(res as i64),
-                Err(err) => Some(-(err as i32) as i64),
+            if let Some(fd) = get_fd_mut(state, regs.rdi as i32) {
+                let buf_addr = regs.rsi as usize;
+                let len = regs.rdx as usize;
+                let flags = regs.r10 as i32;
+                let dest_addr = regs.r8 as *const libc::sockaddr;
+                let addrlen = regs.r9 as libc::socklen_t;
+                let buf = proc.read_memory(buf_addr, len);
+                match handler.sendto(&proc, fd, &buf, flags, dest_addr, addrlen) {
+                    Ok(res) => Some(res as i64),
+                    Err(err) => Some(-(err as i32) as i64),
+                }
+            } else {
+                Some(-libc::EBADF as i64)
             }
         }
         Some(Sysno::recvfrom) => {
-            let fd = get_fd(state, regs.rdi as i32);
-            let buf_addr = regs.rsi as usize;
-            let len = regs.rdx as usize;
-            let flags = regs.r10 as i32;
-            let src_addr = regs.r8 as *mut libc::sockaddr;
-            let addrlen = regs.r9 as *mut libc::socklen_t;
-            match handler.recvfrom(&proc, fd, len, flags, src_addr, addrlen) {
-                Ok(buf) => {
-                    write_bytes(pid, buf_addr, &buf);
-                    Some(buf.len() as i64)
-                },
-                Err(err) => Some(-(err as i32) as i64),
+            if let Some(fd) = get_fd_mut(state, regs.rdi as i32) {
+                let buf_addr = regs.rsi as usize;
+                let len = regs.rdx as usize;
+                let flags = regs.r10 as i32;
+                let src_addr = regs.r8 as *mut libc::sockaddr;
+                let addrlen = regs.r9 as *mut libc::socklen_t;
+                match handler.recvfrom(&proc, fd, len, flags, src_addr, addrlen) {
+                    Ok(buf) => {
+                        write_bytes(pid, buf_addr, &buf);
+                        Some(buf.len() as i64)
+                    },
+                    Err(err) => Some(-(err as i32) as i64),
+                }
+            } else {
+                Some(-libc::EBADF as i64)
             }
         }
         Some(Sysno::fcntl) => {
-            let fd = get_fd(state, regs.rdi as i32);
-            let cmd = regs.rsi as i32;
-            let arg = regs.rdx as libc::c_ulong;
-            match handler.fcntl(&proc, fd, cmd, arg) {
-                Ok(res) => Some(res as i64),
-                Err(err) => Some(-(err as i32) as i64),
+            if let Some(fd) = get_fd_mut(state, regs.rdi as i32) {
+                let cmd = regs.rsi as i32;
+                let arg = regs.rdx as libc::c_ulong;
+                match handler.fcntl(&proc, fd, cmd, arg) {
+                    Ok(res) => Some(res as i64),
+                    Err(err) => Some(-(err as i32) as i64),
+                }
+            } else {
+                Some(-libc::EBADF as i64)
             }
         }
         Some(Sysno::lseek) => {
-            let fd = get_fd(state, regs.rdi as i32);
-            let offset = regs.rsi as libc::off_t;
-            let whence = regs.rdx as i32;
-            match handler.lseek(&proc, fd, offset, whence) {
-                Ok(res) => Some(res as i64),
-                Err(err) => Some(-(err as i32) as i64),
+            if let Some(fd) = get_fd_mut(state, regs.rdi as i32) {
+                let offset = regs.rsi as libc::off_t;
+                let whence = regs.rdx as i32;
+                match handler.lseek(&proc, fd, offset, whence) {
+                    Ok(res) => Some(res as i64),
+                    Err(err) => Some(-(err as i32) as i64),
+                }
+            } else {
+                Some(-libc::EBADF as i64)
             }
         }
         Some(Sysno::unlink) => {
@@ -557,28 +616,37 @@ where
             }
         }
         Some(Sysno::pwrite64) => {
-            let fd = get_fd(state, regs.rdi as i32);
-            let addr = regs.rsi as usize;
-            let count = regs.rdx as usize;
-            let offset = regs.r10 as libc::off_t;
-            let buf = proc.read_memory(addr, count);
-            match handler.pwrite(&proc, fd, &buf, offset) {
-                Ok(res) => Some(res as i64),
-                Err(err) => Some(-(err as i32) as i64),
+            if let Some(fd) = get_fd_mut(state, regs.rdi as i32) {
+                let addr = regs.rsi as usize;
+                let count = regs.rdx as usize;
+                let offset = regs.r10 as libc::off_t;
+                let buf = proc.read_memory(addr, count);
+                match handler.pwrite(&proc, fd, &buf, offset) {
+                    Ok(res) => Some(res as i64),
+                    Err(err) => Some(-(err as i32) as i64),
+                }
+            } else {
+                Some(-libc::EBADF as i64)
             }
         }
         Some(Sysno::fsync) => {
-            let fd = get_fd(state, regs.rdi as i32);
-            match handler.fsync(&proc, fd) {
-                Ok(res) => Some(res as i64),
-                Err(err) => Some(-(err as i32) as i64),
+            if let Some(fd) = get_fd_mut(state, regs.rdi as i32) {
+                match handler.fsync(&proc, fd) {
+                    Ok(res) => Some(res as i64),
+                    Err(err) => Some(-(err as i32) as i64),
+                }
+            } else {
+                Some(-libc::EBADF as i64)
             }
         }
         Some(Sysno::fdatasync) => {
-            let fd = get_fd(state, regs.rdi as i32);
-            match handler.fdatasync(&proc, fd) {
-                Ok(res) => Some(res as i64),
-                Err(err) => Some(-(err as i32) as i64),
+            if let Some(fd) = get_fd_mut(state, regs.rdi as i32) {
+                match handler.fdatasync(&proc, fd) {
+                    Ok(res) => Some(res as i64),
+                    Err(err) => Some(-(err as i32) as i64),
+                }
+            } else {
+                Some(-libc::EBADF as i64)
             }
         }
         Some(Sysno::getcwd) => {
@@ -622,25 +690,18 @@ where
     }
 }
 
-fn get_fd<Fd>(state: &ChildState<Fd>, guest_fd: c_int) -> Fd
-where
-    Fd: Clone + Copy + std::fmt::Debug + From<i32>,
-{
+fn get_fd_mut<Fd>(state: &mut ChildState<Fd>, guest_fd: c_int) -> Option<&mut Fd> {
     if guest_fd < 0 {
-        return Fd::from(guest_fd);
+        return None;
     }
-    match state.fd_map.get(&guest_fd) {
-        Some(fd) => *fd,
-        None => {
-            panic!("Guest FD {} not found in map. Map: {:?}", guest_fd, state.fd_map);
-        }
-    }
+    state.fd_map.get_mut(&guest_fd)
 }
 
-fn register_fd<Fd>(state: &mut ChildState<Fd>, fd: Fd) -> c_int
-where
-    Fd: Clone + Copy + std::fmt::Debug,
-{
+fn take_fd<Fd>(state: &mut ChildState<Fd>, guest_fd: c_int) -> Option<Fd> {
+    state.fd_map.remove(&guest_fd)
+}
+
+fn register_fd<Fd>(state: &mut ChildState<Fd>, fd: Fd) -> c_int {
     let guest_fd = state.next_fd;
     state.next_fd += 1;
     state.fd_map.insert(guest_fd, fd);
@@ -688,9 +749,9 @@ fn write_bytes(pid: Pid, addr: usize, bytes: &[u8]) {
     }
 }
 
-fn read_pollfds<Fd>(pid: Pid, addr: usize, nfds: usize, state: &ChildState<Fd>) -> (Vec<PollFd<Fd>>, Vec<i32>)
+fn read_pollfds<Fd>(pid: Pid, addr: usize, nfds: usize, state: &mut ChildState<Fd>) -> (Vec<PollFd<Fd>>, Vec<i32>)
 where
-    Fd: Clone + Copy + std::fmt::Debug + From<i32>,
+    Fd: std::os::unix::io::AsRawFd,
 {
      let mut fds = Vec::with_capacity(nfds);
      let mut guest_fds = Vec::with_capacity(nfds);
@@ -731,10 +792,29 @@ where
          }
          
          guest_fds.push(fd_int);
-         let fd = get_fd(state, fd_int);
-         fds.push(PollFd { fd, events, revents });
+         // Temporarily remove the fd from the map (we'll restore it after poll)
+         if let Some(fd) = state.fd_map.remove(&fd_int) {
+             fds.push(PollFd { fd, events, revents });
+         } else {
+             // fd not in map, skip (might be -1 or invalid)
+             // We need a placeholder - this is an error case, but let's handle it gracefully
+             // For now, we'll panic since this shouldn't happen in normal operation
+             if fd_int >= 0 {
+                 panic!("Guest FD {} not found in map during poll", fd_int);
+             }
+             // For negative fds (like -1), we can't create a PollFd without a valid Fd
+             // This is an edge case we'll need to handle
+         }
      }
      (fds, guest_fds)
+}
+
+fn restore_pollfds<Fd>(state: &mut ChildState<Fd>, guest_fds: &[i32], fds: Vec<PollFd<Fd>>) {
+    for (guest_fd, pollfd) in guest_fds.iter().zip(fds.into_iter()) {
+        if *guest_fd >= 0 {
+            state.fd_map.insert(*guest_fd, pollfd.fd);
+        }
+    }
 }
 
 fn write_pollfds_revents<Fd>(pid: Pid, addr: usize, fds: &[PollFd<Fd>]) {

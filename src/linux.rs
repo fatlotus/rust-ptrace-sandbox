@@ -1,16 +1,19 @@
 use libc::{c_int, c_void, mode_t, off_t};
 use crate::captured::CapturedProcess;
 
-pub trait Linux<Fd: Clone + Copy + std::fmt::Debug + From<i32>> {
+pub trait Linux<Fd> {
+    /// Get default file descriptors for stdin, stdout, stderr
+    fn default_fds(&mut self) -> (Fd, Fd, Fd);
+
     /// write - write to a file descriptor
     ///
     /// write() writes up to count bytes from the buffer starting at buf to the file referred to by the file descriptor fd.
-    fn write(&mut self, proc: &CapturedProcess, fd: Fd, buf: &[u8]) -> nix::Result<usize>;
+    fn write(&mut self, proc: &CapturedProcess, fd: &mut Fd, buf: &[u8]) -> nix::Result<usize>;
 
     /// read - read from a file descriptor
     ///
     /// read() attempts to read up to count bytes from file descriptor fd into the buffer starting at buf.
-    fn read(&mut self, proc: &CapturedProcess, fd: Fd, count: usize) -> nix::Result<Vec<u8>>;
+    fn read(&mut self, proc: &CapturedProcess, fd: &mut Fd, count: usize) -> nix::Result<Vec<u8>>;
 
     /// open, openat, creat - open and possibly create a file
     ///
@@ -18,7 +21,8 @@ pub trait Linux<Fd: Clone + Copy + std::fmt::Debug + From<i32>> {
     fn open(&mut self, proc: &CapturedProcess, pathname: &str, flags: c_int, mode: mode_t) -> nix::Result<Fd>;
 
     /// openat - open and possibly create a file relative to a directory file descriptor
-    fn openat(&mut self, proc: &CapturedProcess, dirfd: Fd, pathname: &str, flags: c_int, mode: mode_t) -> nix::Result<Fd>;
+    /// dirfd: None means AT_FDCWD
+    fn openat(&mut self, proc: &CapturedProcess, dirfd: Option<&mut Fd>, pathname: &str, flags: c_int, mode: mode_t) -> nix::Result<Fd>;
 
     /// close - close a file descriptor
     ///
@@ -28,15 +32,17 @@ pub trait Linux<Fd: Clone + Copy + std::fmt::Debug + From<i32>> {
     /// stat, fstat, lstat, fstatat - get file status
     ///
     /// These functions return information about a file, in the buffer pointed to by statbuf.
-    fn fstat(&mut self, proc: &CapturedProcess, fd: Fd) -> nix::Result<c_int>;
+    fn fstat(&mut self, proc: &CapturedProcess, fd: &mut Fd) -> nix::Result<c_int>;
 
     /// newfstatat - get file status relative to a directory file descriptor
-    fn newfstatat(&mut self, proc: &CapturedProcess, dirfd: Fd, pathname: &str, flags: c_int) -> nix::Result<c_int>;
+    /// dirfd: None means AT_FDCWD
+    fn newfstatat(&mut self, proc: &CapturedProcess, dirfd: Option<&mut Fd>, pathname: &str, flags: c_int) -> nix::Result<c_int>;
 
     /// mmap, munmap - map or unmap files or devices into memory
     ///
     /// mmap() creates a new mapping in the virtual address space of the calling process.
-    fn mmap(&mut self, proc: &CapturedProcess, addr: *mut c_void, length: usize, prot: c_int, flags: c_int, fd: Fd, offset: off_t) -> nix::Result<*mut c_void>;
+    /// fd: None means -1 (anonymous mapping)
+    fn mmap(&mut self, proc: &CapturedProcess, addr: *mut c_void, length: usize, prot: c_int, flags: c_int, fd: Option<&mut Fd>, offset: off_t) -> nix::Result<*mut c_void>;
 
     /// munmap - unmap a file or device from memory
     ///
@@ -83,55 +89,55 @@ pub trait Linux<Fd: Clone + Copy + std::fmt::Debug + From<i32>> {
     fn socket(&mut self, proc: &CapturedProcess, domain: c_int, ty: c_int, protocol: c_int) -> nix::Result<Fd>;
 
     /// bind - bind a name to a socket
-    fn bind(&mut self, proc: &CapturedProcess, fd: Fd, addr: *const libc::sockaddr, len: libc::socklen_t) -> nix::Result<c_int>;
+    fn bind(&mut self, proc: &CapturedProcess, fd: &mut Fd, addr: *const libc::sockaddr, len: libc::socklen_t) -> nix::Result<c_int>;
 
     /// listen - listen for connections on a socket
-    fn listen(&mut self, proc: &CapturedProcess, fd: Fd, backlog: c_int) -> nix::Result<c_int>;
+    fn listen(&mut self, proc: &CapturedProcess, fd: &mut Fd, backlog: c_int) -> nix::Result<c_int>;
 
     /// accept - accept a connection on a socket
-    fn accept(&mut self, proc: &CapturedProcess, fd: Fd, addr: *mut libc::sockaddr, len: *mut libc::socklen_t) -> nix::Result<Fd>;
+    fn accept(&mut self, proc: &CapturedProcess, fd: &mut Fd, addr: *mut libc::sockaddr, len: *mut libc::socklen_t) -> nix::Result<Fd>;
 
     /// accept4 - accept a connection on a socket
-    fn accept4(&mut self, proc: &CapturedProcess, fd: Fd, addr: *mut libc::sockaddr, len: *mut libc::socklen_t, flags: c_int) -> nix::Result<Fd>;
+    fn accept4(&mut self, proc: &CapturedProcess, fd: &mut Fd, addr: *mut libc::sockaddr, len: *mut libc::socklen_t, flags: c_int) -> nix::Result<Fd>;
 
     /// connect - initiate a connection on a socket
-    fn connect(&mut self, proc: &CapturedProcess, fd: Fd, addr: *const libc::sockaddr, len: libc::socklen_t) -> nix::Result<c_int>;
+    fn connect(&mut self, proc: &CapturedProcess, fd: &mut Fd, addr: *const libc::sockaddr, len: libc::socklen_t) -> nix::Result<c_int>;
 
     /// setsockopt - set options on sockets
-    fn setsockopt(&mut self, proc: &CapturedProcess, fd: Fd, level: c_int, optname: c_int, optval: *const c_void, optlen: libc::socklen_t) -> nix::Result<c_int>;
+    fn setsockopt(&mut self, proc: &CapturedProcess, fd: &mut Fd, level: c_int, optname: c_int, optval: *const c_void, optlen: libc::socklen_t) -> nix::Result<c_int>;
 
     /// getsockname - get socket name
-    fn getsockname(&mut self, proc: &CapturedProcess, fd: Fd, addr: *mut libc::sockaddr, len: *mut libc::socklen_t) -> nix::Result<c_int>;
+    fn getsockname(&mut self, proc: &CapturedProcess, fd: &mut Fd, addr: *mut libc::sockaddr, len: *mut libc::socklen_t) -> nix::Result<c_int>;
 
     /// pread - read from or write to a file descriptor at a given offset
-    fn pread(&mut self, proc: &CapturedProcess, fd: Fd, count: usize, offset: off_t) -> nix::Result<Vec<u8>>;
+    fn pread(&mut self, proc: &CapturedProcess, fd: &mut Fd, count: usize, offset: off_t) -> nix::Result<Vec<u8>>;
 
     /// poll - wait for some event on a file descriptor
     fn poll(&mut self, proc: &CapturedProcess, fds: &mut [PollFd<Fd>], timeout: c_int) -> nix::Result<c_int>;
 
     /// sendto - send a message on a socket
-    fn sendto(&mut self, proc: &CapturedProcess, fd: Fd, buf: &[u8], flags: c_int, addr: *const libc::sockaddr, len: libc::socklen_t) -> nix::Result<usize>;
+    fn sendto(&mut self, proc: &CapturedProcess, fd: &mut Fd, buf: &[u8], flags: c_int, addr: *const libc::sockaddr, len: libc::socklen_t) -> nix::Result<usize>;
 
     /// recvfrom - receive a message from a socket
-    fn recvfrom(&mut self, proc: &CapturedProcess, fd: Fd, count: usize, flags: c_int, addr: *mut libc::sockaddr, len: *mut libc::socklen_t) -> nix::Result<Vec<u8>>;
+    fn recvfrom(&mut self, proc: &CapturedProcess, fd: &mut Fd, count: usize, flags: c_int, addr: *mut libc::sockaddr, len: *mut libc::socklen_t) -> nix::Result<Vec<u8>>;
 
     /// fcntl - manipulate file descriptor
-    fn fcntl(&mut self, proc: &CapturedProcess, fd: Fd, cmd: c_int, arg: libc::c_ulong) -> nix::Result<c_int>;
+    fn fcntl(&mut self, proc: &CapturedProcess, fd: &mut Fd, cmd: c_int, arg: libc::c_ulong) -> nix::Result<c_int>;
 
     /// lseek - reposition read/write file offset
-    fn lseek(&mut self, proc: &CapturedProcess, fd: Fd, offset: off_t, whence: c_int) -> nix::Result<off_t>;
+    fn lseek(&mut self, proc: &CapturedProcess, fd: &mut Fd, offset: off_t, whence: c_int) -> nix::Result<off_t>;
 
     /// unlink - delete a name and possibly the file it refers to
     fn unlink(&mut self, proc: &CapturedProcess, pathname: &str) -> nix::Result<c_int>;
 
     /// pwrite64 - write to a file descriptor at a given offset
-    fn pwrite(&mut self, proc: &CapturedProcess, fd: Fd, buf: &[u8], offset: off_t) -> nix::Result<usize>;
+    fn pwrite(&mut self, proc: &CapturedProcess, fd: &mut Fd, buf: &[u8], offset: off_t) -> nix::Result<usize>;
 
     /// fsync - synchronize a file's in-core state with storage device
-    fn fsync(&mut self, proc: &CapturedProcess, fd: Fd) -> nix::Result<c_int>;
+    fn fsync(&mut self, proc: &CapturedProcess, fd: &mut Fd) -> nix::Result<c_int>;
 
     /// fdatasync - synchronize a file's in-core state with storage device
-    fn fdatasync(&mut self, proc: &CapturedProcess, fd: Fd) -> nix::Result<c_int>;
+    fn fdatasync(&mut self, proc: &CapturedProcess, fd: &mut Fd) -> nix::Result<c_int>;
 
     /// getcwd - get current working directory
     fn getcwd(&mut self, proc: &CapturedProcess, size: usize) -> nix::Result<Vec<u8>>;
