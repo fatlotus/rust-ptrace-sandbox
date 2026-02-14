@@ -55,25 +55,6 @@ impl CapturedProcess {
         data
     }
 
-    pub fn write_memory(&self, addr: usize, data: &[u8]) -> Result<()> {
-        let mut written = 0;
-        while written < data.len() {
-            let mut word = [0u8; 8];
-            let to_copy = std::cmp::min(data.len() - written, 8);
-            
-            // If less than a word, read existing word first to preserve other bytes
-            if to_copy < 8 {
-                let existing = ptrace::read(self.pid, (addr + written) as *mut _).unwrap_or(0);
-                word = existing.to_ne_bytes();
-            }
-            
-            word[..to_copy].copy_from_slice(&data[written..written + to_copy]);
-            let word_val = i64::from_ne_bytes(word);
-            ptrace::write(self.pid, (addr + written) as *mut _, word_val)?;
-            written += to_copy;
-        }
-        Ok(())
-    }
 
     // Syscall wrappers
     pub fn write(&self, fd: c_int, addr: u64, count: usize) -> Result<i64> {

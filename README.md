@@ -27,11 +27,12 @@ close(3) = 0
 
 ## Code Layout
 
-- `src/linux.rs`: The `Linux` trait which defines system calls. It now returns `nix::Result` and each method receives a `&CapturedProcess` to interact with the tracee.
-- `src/passthru.rs`: A "passthru" implementation of the `Linux` trait that logs and forwards syscalls to the native OS by executing them directly in the tracee context via `CapturedProcess`.
+- `src/linux.rs`: The `Linux` trait which defines system calls. It is now generic over a file descriptor type `Fd`, allowing implementations to define what a file descriptor represents. It returns `nix::Result` and each method receives a `&CapturedProcess` to interact with the tracee.
+- `src/passthru.rs`: A "passthru" implementation of the `Linux` trait that uses a `PassthruFd` struct (wrapping a `c_int`). It logs and forwards syscalls to the native OS by executing them directly in the tracee context via `CapturedProcess`.
 - `src/captured.rs`: The `CapturedProcess` struct which encapsulates `ptrace` operations, providing high-level methods for system call injection and memory access in the tracee.
 - `src/vdso.rs`: Logic to disable the virtual Dynamic Shared Object (vDSO) in tracee processes.
-- `src/interceptor.rs`: The core logic that handles the ptrace loop and dispatches events to the `Linux` trait.
+- `src/interceptor.rs`: The core logic that handles the ptrace loop. it maintains a mapping between guest `c_int` file descriptors and the generic `Fd` type used by the `Linux` implementation.
+
 - `src/main.rs`: The CLI entry point.
 
 ## Testing

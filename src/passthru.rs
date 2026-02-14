@@ -2,61 +2,64 @@ use crate::linux::Linux;
 use crate::captured::CapturedProcess;
 use libc::{c_int, c_void, mode_t, off_t};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PassthruFd(pub c_int);
+
 pub struct Passthru;
 
-impl Linux for Passthru {
-    fn write(&mut self, proc: &CapturedProcess, fd: c_int, buf: &[u8]) -> nix::Result<usize> {
+impl Linux<PassthruFd> for Passthru {
+    fn write(&mut self, proc: &CapturedProcess, fd: PassthruFd, buf: &[u8]) -> nix::Result<usize> {
         let regs = proc.get_regs()?;
-        let res = proc.write(fd, regs.rsi, buf.len())?;
-        println!("write({}, {:?}, {}) = {}", fd, String::from_utf8_lossy(buf), buf.len(), res);
+        let res = proc.write(fd.0, regs.rsi, buf.len())?;
+        println!("write({}, {:?}, {}) = {}", fd.0, String::from_utf8_lossy(buf), buf.len(), res);
         Ok(res as usize)
     }
 
-    fn read(&mut self, proc: &CapturedProcess, fd: c_int, count: usize) -> nix::Result<Vec<u8>> {
+    fn read(&mut self, proc: &CapturedProcess, fd: PassthruFd, count: usize) -> nix::Result<Vec<u8>> {
         let regs = proc.get_regs()?;
-        let res = proc.read(fd, regs.rsi, count)?;
+        let res = proc.read(fd.0, regs.rsi, count)?;
         let buf = proc.read_memory(regs.rsi as usize, res as usize);
-        println!("read({}, ..., {}) = {}", fd, count, res);
+        println!("read({}, ..., {}) = {}", fd.0, count, res);
         Ok(buf)
     }
 
-    fn open(&mut self, proc: &CapturedProcess, pathname: &str, flags: c_int, mode: mode_t) -> nix::Result<c_int> {
+    fn open(&mut self, proc: &CapturedProcess, pathname: &str, flags: c_int, mode: mode_t) -> nix::Result<PassthruFd> {
         let regs = proc.get_regs()?;
         let res = proc.open(regs.rdi, flags, mode)?;
         println!("open({:?}, {}, {}) = {}", pathname, flags, mode, res);
-        Ok(res as c_int)
+        Ok(PassthruFd(res as c_int))
     }
 
-    fn openat(&mut self, proc: &CapturedProcess, dirfd: c_int, pathname: &str, flags: c_int, mode: mode_t) -> nix::Result<c_int> {
+    fn openat(&mut self, proc: &CapturedProcess, dirfd: PassthruFd, pathname: &str, flags: c_int, mode: mode_t) -> nix::Result<PassthruFd> {
         let regs = proc.get_regs()?;
-        let res = proc.openat(dirfd, regs.rsi, flags, mode)?;
-        println!("openat({}, {:?}, {}, {}) = {}", dirfd, pathname, flags, mode, res);
+        let res = proc.openat(dirfd.0, regs.rsi, flags, mode)?;
+        println!("openat({}, {:?}, {}, {}) = {}", dirfd.0, pathname, flags, mode, res);
+        Ok(PassthruFd(res as c_int))
+    }
+
+    fn close(&mut self, proc: &CapturedProcess, fd: PassthruFd) -> nix::Result<c_int> {
+        let res = proc.close(fd.0)?;
+        println!("close({}) = {}", fd.0, res);
         Ok(res as c_int)
     }
 
-    fn close(&mut self, proc: &CapturedProcess, fd: c_int) -> nix::Result<c_int> {
-        let res = proc.close(fd)?;
-        println!("close({}) = {}", fd, res);
-        Ok(res as c_int)
-    }
-
-    fn fstat(&mut self, proc: &CapturedProcess, fd: c_int) -> nix::Result<c_int> {
+    fn fstat(&mut self, proc: &CapturedProcess, fd: PassthruFd) -> nix::Result<c_int> {
         let regs = proc.get_regs()?;
-        let res = proc.fstat(fd, regs.rsi)?;
-        println!("fstat({}, ...) = {}", fd, res);
+        let res = proc.fstat(fd.0, regs.rsi)?;
+        println!("fstat({}, ...) = {}", fd.0, res);
         Ok(res as c_int)
     }
 
-    fn newfstatat(&mut self, proc: &CapturedProcess, dirfd: c_int, pathname: &str, flags: c_int) -> nix::Result<c_int> {
+    fn newfstatat(&mut self, proc: &CapturedProcess, dirfd: PassthruFd, pathname: &str, flags: c_int) -> nix::Result<c_int> {
         let regs = proc.get_regs()?;
-        let res = proc.newfstatat(dirfd, regs.rsi, regs.rdx, flags)?;
-        println!("newfstatat({}, {:?}, ..., {}) = {}", dirfd, pathname, flags, res);
+        let res = proc.newfstatat(dirfd.0, regs.rsi, regs.rdx, flags)?;
+        println!("newfstatat({}, {:?}, ..., {}) = {}", dirfd.0, pathname, flags, res);
         Ok(res as c_int)
     }
 
-    fn mmap(&mut self, proc: &CapturedProcess, addr: *mut c_void, length: usize, prot: c_int, flags: c_int, fd: c_int, offset: off_t) -> nix::Result<*mut c_void> {
-        let res = proc.mmap(addr, length, prot, flags, fd, offset)?;
-        println!("mmap({:?}, {}, {}, {}, {}, {}) = {:?}", addr, length, prot, flags, fd, offset, res as *mut c_void);
+    fn mmap(&mut self, proc: &CapturedProcess, addr: *mut c_void, length: usize, prot: c_int, flags: c_int, fd: PassthruFd, offset: off_t) -> nix::Result<*mut c_void> {
+        let res = proc.mmap(addr, length, prot, flags, fd.0, offset)?;
+        println!("mmap({:?}, {}, {}, {}, {}, {}) = {:?}", addr, length, prot, flags, fd.0, offset, res as *mut c_void);
         Ok(res as *mut c_void)
     }
 
@@ -106,57 +109,67 @@ impl Linux for Passthru {
         Ok(nix::unistd::Pid::from_raw(0)) // Dummy
     }
 
-    fn socket(&mut self, proc: &CapturedProcess, domain: c_int, ty: c_int, protocol: c_int) -> nix::Result<c_int> {
+    fn socket(&mut self, proc: &CapturedProcess, domain: c_int, ty: c_int, protocol: c_int) -> nix::Result<PassthruFd> {
         let res = proc.socket(domain, ty, protocol)?;
         println!("socket({}, {}, {}) = {}", domain, ty, protocol, res);
-        Ok(res as c_int)
+        Ok(PassthruFd(res as c_int))
     }
 
-    fn bind(&mut self, proc: &CapturedProcess, fd: c_int, addr: *const libc::sockaddr, len: libc::socklen_t) -> nix::Result<c_int> {
+    fn bind(&mut self, proc: &CapturedProcess, fd: PassthruFd, addr: *const libc::sockaddr, len: libc::socklen_t) -> nix::Result<c_int> {
         let regs = proc.get_regs()?;
-        let res = proc.bind(fd, regs.rsi, len)?;
-        println!("bind({}, {:?}, {}) = {}", fd, addr, len, res);
+        let res = proc.bind(fd.0, regs.rsi, len)?;
+        println!("bind({}, {:?}, {}) = {}", fd.0, addr, len, res);
         Ok(res as c_int)
     }
 
-    fn listen(&mut self, proc: &CapturedProcess, fd: c_int, backlog: c_int) -> nix::Result<c_int> {
-        let res = proc.listen(fd, backlog)?;
-        println!("listen({}, {}) = {}", fd, backlog, res);
+    fn listen(&mut self, proc: &CapturedProcess, fd: PassthruFd, backlog: c_int) -> nix::Result<c_int> {
+        let res = proc.listen(fd.0, backlog)?;
+        println!("listen({}, {}) = {}", fd.0, backlog, res);
         Ok(res as c_int)
     }
 
-    fn accept(&mut self, proc: &CapturedProcess, fd: c_int, addr: *mut libc::sockaddr, len: *mut libc::socklen_t) -> nix::Result<c_int> {
+    fn accept(&mut self, proc: &CapturedProcess, fd: PassthruFd, addr: *mut libc::sockaddr, len: *mut libc::socklen_t) -> nix::Result<PassthruFd> {
         let regs = proc.get_regs()?;
-        let res = proc.accept(fd, regs.rsi, regs.rdx)?;
-        println!("accept({}, {:?}, {:?}) = {}", fd, addr, len, res);
+        let res = proc.accept(fd.0, regs.rsi, regs.rdx)?;
+        println!("accept({}, {:?}, {:?}) = {}", fd.0, addr, len, res);
+        Ok(PassthruFd(res as c_int))
+    }
+
+    fn accept4(&mut self, proc: &CapturedProcess, fd: PassthruFd, addr: *mut libc::sockaddr, len: *mut libc::socklen_t, flags: c_int) -> nix::Result<PassthruFd> {
+        let regs = proc.get_regs()?;
+        let res = proc.accept4(fd.0, regs.rsi, regs.rdx, flags)?;
+        println!("accept4({}, {:?}, {:?}, {}) = {}", fd.0, addr, len, flags, res);
+        Ok(PassthruFd(res as c_int))
+    }
+
+    fn connect(&mut self, proc: &CapturedProcess, fd: PassthruFd, addr: *const libc::sockaddr, len: libc::socklen_t) -> nix::Result<c_int> {
+        let regs = proc.get_regs()?;
+        let res = proc.connect(fd.0, regs.rsi, len)?;
+        println!("connect({}, {:?}, {}) = {}", fd.0, addr, len, res);
         Ok(res as c_int)
     }
 
-    fn accept4(&mut self, proc: &CapturedProcess, fd: c_int, addr: *mut libc::sockaddr, len: *mut libc::socklen_t, flags: c_int) -> nix::Result<c_int> {
+    fn setsockopt(&mut self, proc: &CapturedProcess, fd: PassthruFd, level: c_int, optname: c_int, optval: *const c_void, optlen: libc::socklen_t) -> nix::Result<c_int> {
         let regs = proc.get_regs()?;
-        let res = proc.accept4(fd, regs.rsi, regs.rdx, flags)?;
-        println!("accept4({}, {:?}, {:?}, {}) = {}", fd, addr, len, flags, res);
+        let res = proc.setsockopt(fd.0, level, optname, regs.r10, optlen)?;
+        println!("setsockopt({}, {}, {}, {:?}, {}) = {}", fd.0, level, optname, optval, optlen, res);
         Ok(res as c_int)
     }
 
-    fn connect(&mut self, proc: &CapturedProcess, fd: c_int, addr: *const libc::sockaddr, len: libc::socklen_t) -> nix::Result<c_int> {
+    fn getsockname(&mut self, proc: &CapturedProcess, fd: PassthruFd, addr: *mut libc::sockaddr, len: *mut libc::socklen_t) -> nix::Result<c_int> {
         let regs = proc.get_regs()?;
-        let res = proc.connect(fd, regs.rsi, len)?;
-        println!("connect({}, {:?}, {}) = {}", fd, addr, len, res);
+        let res = proc.getsockname(fd.0, regs.rsi, regs.rdx)?;
+        println!("getsockname({}, {:?}, {:?}) = {}", fd.0, addr, len, res);
         Ok(res as c_int)
     }
 
-    fn setsockopt(&mut self, proc: &CapturedProcess, fd: c_int, level: c_int, optname: c_int, optval: *const c_void, optlen: libc::socklen_t) -> nix::Result<c_int> {
-        let regs = proc.get_regs()?;
-        let res = proc.setsockopt(fd, level, optname, regs.r10, optlen)?;
-        println!("setsockopt({}, {}, {}, {:?}, {}) = {}", fd, level, optname, optval, optlen, res);
-        Ok(res as c_int)
+    fn wrap_fd(&self, fd: c_int) -> PassthruFd {
+        PassthruFd(fd)
     }
 
-    fn getsockname(&mut self, proc: &CapturedProcess, fd: c_int, addr: *mut libc::sockaddr, len: *mut libc::socklen_t) -> nix::Result<c_int> {
-        let regs = proc.get_regs()?;
-        let res = proc.getsockname(fd, regs.rsi, regs.rdx)?;
-        println!("getsockname({}, {:?}, {:?}) = {}", fd, addr, len, res);
-        Ok(res as c_int)
+    fn unwrap_fd(&self, fd: PassthruFd) -> c_int {
+        fd.0
     }
 }
+
+
