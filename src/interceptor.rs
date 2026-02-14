@@ -436,6 +436,10 @@ where
                 Err(err) => Some(-(err as i32) as i64),
             }
         }
+        Some(other_system_call) => {
+            eprintln!("Child {} got an unknown system call: {}", pid, other_system_call);
+            None
+        }
         _ => None,
     }
 }
