@@ -196,7 +196,7 @@ impl Linux<PassthruFd> for Passthru {
         Ok(res as c_int)
     }
 
-    fn sendto(&mut self, proc: &CapturedProcess, fd: PassthruFd, buf: &[u8], flags: c_int, addr: *const libc::sockaddr, len: libc::socklen_t) -> nix::Result<usize> {
+    fn sendto(&mut self, proc: &CapturedProcess, fd: PassthruFd, buf: &[u8], flags: c_int, _addr: *const libc::sockaddr, _len: libc::socklen_t) -> nix::Result<usize> {
         let regs = proc.get_regs()?;
         let res = proc.sendto(fd.0, regs.rsi, buf.len(), flags, regs.r8, regs.r9 as libc::socklen_t)?;
         println!("sendto({}, ..., {}, ...) = {}", fd.0, buf.len(), res);

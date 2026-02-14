@@ -103,8 +103,6 @@ pub trait Linux<Fd: Clone + Copy + std::fmt::Debug + From<i32>> {
     /// getsockname - get socket name
     fn getsockname(&mut self, proc: &CapturedProcess, fd: Fd, addr: *mut libc::sockaddr, len: *mut libc::socklen_t) -> nix::Result<c_int>;
 
-    /// wrap_fd - wrap a raw file descriptor into the generic Fd type
-
     /// pread - read from or write to a file descriptor at a given offset
     fn pread(&mut self, proc: &CapturedProcess, fd: Fd, count: usize, offset: off_t) -> nix::Result<Vec<u8>>;
 

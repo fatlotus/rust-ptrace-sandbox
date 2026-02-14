@@ -572,7 +572,7 @@ fn write_bytes(pid: Pid, addr: usize, bytes: &[u8]) {
                 j += 1;
             }
             let new_word = i64::from_ne_bytes(word_bytes);
-            unsafe { ptrace::write(pid, word_addr, new_word).unwrap_or(()); }
+            ptrace::write(pid, word_addr, new_word).unwrap_or(());
             current_addr += j;
         } else {
              break;
