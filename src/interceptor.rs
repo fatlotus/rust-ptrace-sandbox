@@ -682,6 +682,19 @@ where
                 Err(err) => Some(-(err as i32) as i64),
             }
         }
+        Some(Sysno::getrandom) => {
+            let buf_addr = regs.rdi as usize;
+            let count = regs.rsi as usize;
+            let flags = regs.rdx as i32;
+            let mut buf = vec![0u8; count];
+            match handler.getrandom(&proc, &mut buf, flags) {
+                Ok(res) => {
+                    write_bytes(pid, buf_addr, &buf[..res]);
+                    Some(res as i64)
+                }
+                Err(err) => Some(-(err as i32) as i64),
+            }
+        }
         Some(other_system_call) => {
             eprintln!("Child {} got an unknown system call: {}", pid, other_system_call);
             None

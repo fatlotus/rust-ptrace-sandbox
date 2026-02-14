@@ -154,6 +154,9 @@ pub trait Linux<Fd> {
 
     /// geteuid - get effective user identification
     fn geteuid(&mut self, proc: &CapturedProcess) -> nix::Result<c_int>;
+
+    /// getrandom - obtain a series of random bytes
+    fn getrandom(&mut self, proc: &CapturedProcess, buf: &mut [u8], flags: c_int) -> nix::Result<usize>;
 }
 
 #[derive(Debug, Clone, Copy, Default)]

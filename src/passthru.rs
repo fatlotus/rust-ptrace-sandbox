@@ -289,6 +289,15 @@ impl Linux<PassthruFd> for Passthru {
         println!("geteuid() = {}", res);
         Ok(res as c_int)
     }
+
+    fn getrandom(&mut self, proc: &CapturedProcess, buf: &mut [u8], flags: c_int) -> nix::Result<usize> {
+        let regs = proc.get_regs()?;
+        let res = proc.getrandom(regs.rdi, buf.len(), flags)?;
+        let read_buf = proc.read_memory(regs.rdi as usize, res as usize);
+        buf[..res as usize].copy_from_slice(&read_buf);
+        println!("getrandom(..., {}, {}) = {}", buf.len(), flags, res);
+        Ok(res as usize)
+    }
 }
 
 

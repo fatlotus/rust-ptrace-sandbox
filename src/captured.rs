@@ -59,6 +59,30 @@ impl CapturedProcess {
         data
     }
 
+    pub fn write_memory(&self, addr: usize, bytes: &[u8]) {
+        let mut current_addr = addr;
+        let mut i = 0;
+        while i < bytes.len() {
+            let word_addr = (current_addr & !7) as *mut libc::c_void;
+            let offset = current_addr & 7;
+            
+            if let Ok(orig_word) = ptrace::read(self.pid, word_addr) {
+                let mut word_bytes = orig_word.to_ne_bytes();
+                let mut j = 0;
+                while j < 8 - offset && i < bytes.len() {
+                    word_bytes[offset + j] = bytes[i];
+                    i += 1;
+                    j += 1;
+                }
+                let new_word = i64::from_ne_bytes(word_bytes);
+                ptrace::write(self.pid, word_addr, new_word).unwrap_or(());
+                current_addr += j;
+            } else {
+                 break;
+            }
+        }
+    }
+
 
     // Syscall wrappers
     pub fn write(&self, fd: c_int, addr: u64, count: usize) -> Result<i64> {
@@ -199,5 +223,9 @@ impl CapturedProcess {
 
     pub fn geteuid(&self) -> Result<i64> {
         self.syscall(libc::SYS_geteuid as u64, 0, 0, 0, 0, 0, 0)
+    }
+
+    pub fn getrandom(&self, addr: u64, count: usize, flags: c_int) -> Result<i64> {
+        self.syscall(libc::SYS_getrandom as u64, addr, count as u64, flags as u64, 0, 0, 0)
     }
 }

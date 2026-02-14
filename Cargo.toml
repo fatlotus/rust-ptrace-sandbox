@@ -7,3 +7,4 @@ edition = "2024"
 libc = "0.2.180"
 nix = { version = "0.31.1", features = ["ptrace", "process", "user", "fs", "signal", "poll", "event"] }
 syscalls = "0.6.18"
+rand = "0.8"

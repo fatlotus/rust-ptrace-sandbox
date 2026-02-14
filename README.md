@@ -16,6 +16,15 @@ cargo run -- /bin/date
 cargo run -- /bin/cat Cargo.toml
 ```
 
+### Sandbox Mode (Deterministic)
+
+You can enable a deterministic sandbox mode with the `--sandbox` flag. In this mode, system calls related to time and randomness return fixed, predictable values:
+
+```bash
+cargo run -- --sandbox /bin/date
+cargo run -- --sandbox target/debug/random_gen
+```
+
 The output will show the intercepted system calls and their results:
 
 ```
@@ -31,6 +40,7 @@ close(3) = 0
 - `src/passthru.rs`: A "passthru" implementation of the `Linux` trait that uses a `PassthruFd` struct (wrapping a `c_int`). It logs and forwards syscalls to the native OS by executing them directly in the tracee context via `CapturedProcess`.
 - `src/captured.rs`: The `CapturedProcess` struct which encapsulates `ptrace` operations, providing high-level methods for system call injection and memory access in the tracee.
 - `src/vdso.rs`: Logic to disable the virtual Dynamic Shared Object (vDSO) in tracee processes.
+- `src/deterministic.rs`: A deterministic implementation of the `Linux` trait that overrides time and randomness syscalls.
 - `src/interceptor.rs`: The core logic that handles the ptrace loop. it maintains a mapping between guest `c_int` file descriptors and the generic `Fd` type used by the `Linux` implementation.
 
 - `src/main.rs`: The CLI entry point.
@@ -52,6 +62,7 @@ The following tests verify functionality:
 - `tests/fork_test.rs`: Process creation interception (fork, vfork, clone).
 - `tests/networking.rs`: Networking interception (socket, bind, accept, connect).
 - `tests/sqlite_test.rs`: SQLite3 support (lseek, unlink, pwrite64, fsync, fdatasync, getcwd).
+- `tests/deterministic_test.rs`: Verification of deterministic time and randomness in sandbox mode.
 
 ## Parallel Tracing
 
