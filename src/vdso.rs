@@ -28,22 +28,19 @@ pub fn disable_vdso(child: Pid, sp: u64) {
 
     let mut vdso_addr = 0u64;
     // Search auxv
-    loop {
-        let key = match ptrace::read(child, addr as *mut c_void) {
-            Ok(val) => val as u64,
-            Err(_) => break,
-        };
+    while let Ok(key) = ptrace::read(child, addr as *mut c_void) {
+        let key = key as u64;
         if key == 0 { break; }
         
         let val_addr = (addr + 8) as *mut c_void;
-        let val = match ptrace::read(child, val_addr) {
-            Ok(v) => v as u64,
-            Err(_) => break,
-        };
-        
-        if key == 33 { // AT_SYSINFO_EHDR
-            vdso_addr = val;
-            let _ = ptrace::write(child, val_addr, 0i64);
+        if let Ok(val) = ptrace::read(child, val_addr) {
+            let val = val as u64;
+            if key == 33 { // AT_SYSINFO_EHDR
+                vdso_addr = val;
+                let _ = ptrace::write(child, val_addr, 0i64);
+                break;
+            }
+        } else {
             break;
         }
         addr += 16;

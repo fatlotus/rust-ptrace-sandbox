@@ -94,19 +94,19 @@ impl Linux<PassthruFd> for Passthru {
         Ok(res as c_int)
     }
 
-    fn fork(&mut self, _proc: &CapturedProcess) -> nix::Result<nix::unistd::Pid> {
+    fn fork(&mut self, _proc: &CapturedProcess) -> nix::Result<(nix::unistd::Pid, Box<dyn Linux<PassthruFd> + Send>)> {
         println!("fork() = ?");
-        Ok(nix::unistd::Pid::from_raw(0)) // Dummy
+        Ok((nix::unistd::Pid::from_raw(0), Box::new(Passthru)))
     }
 
-    fn vfork(&mut self, _proc: &CapturedProcess) -> nix::Result<nix::unistd::Pid> {
+    fn vfork(&mut self, _proc: &CapturedProcess) -> nix::Result<(nix::unistd::Pid, Box<dyn Linux<PassthruFd> + Send>)> {
         println!("vfork() = ?");
-        Ok(nix::unistd::Pid::from_raw(0)) // Dummy
+        Ok((nix::unistd::Pid::from_raw(0), Box::new(Passthru)))
     }
 
-    fn clone(&mut self, _proc: &CapturedProcess, flags: c_int) -> nix::Result<nix::unistd::Pid> {
+    fn clone(&mut self, _proc: &CapturedProcess, flags: i32) -> nix::Result<(nix::unistd::Pid, Box<dyn Linux<PassthruFd> + Send>)> {
         println!("clone(flags={}) = ?", flags);
-        Ok(nix::unistd::Pid::from_raw(0)) // Dummy
+        Ok((nix::unistd::Pid::from_raw(0), Box::new(Passthru)))
     }
 
     fn socket(&mut self, proc: &CapturedProcess, domain: c_int, ty: c_int, protocol: c_int) -> nix::Result<PassthruFd> {

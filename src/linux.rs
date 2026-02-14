@@ -67,17 +67,17 @@ pub trait Linux<Fd: Clone + Copy + std::fmt::Debug> {
     /// fork - create a child process
     ///
     /// fork() creates a new process by duplicating the calling process.
-    fn fork(&mut self, proc: &CapturedProcess) -> nix::Result<nix::unistd::Pid>;
+    fn fork(&mut self, proc: &CapturedProcess) -> nix::Result<(nix::unistd::Pid, Box<dyn Linux<Fd> + Send>)>;
 
     /// vfork - create a child process and block parent
     ///
     /// vfork() differs from fork(2) in that the calling thread is suspended until the child terminates (either normally, by calling _exit(2), or abnormally, after delivery of a fatal signal), or it makes a call to execve(2).
-    fn vfork(&mut self, proc: &CapturedProcess) -> nix::Result<nix::unistd::Pid>;
+    fn vfork(&mut self, proc: &CapturedProcess) -> nix::Result<(nix::unistd::Pid, Box<dyn Linux<Fd> + Send>)>;
 
     /// clone, __clone2, clone3 - create a child process
     ///
     /// These system calls create a new ("child") process, in a manner similar to fork(2).
-    fn clone(&mut self, proc: &CapturedProcess, flags: c_int) -> nix::Result<nix::unistd::Pid>;
+    fn clone(&mut self, proc: &CapturedProcess, flags: c_int) -> nix::Result<(nix::unistd::Pid, Box<dyn Linux<Fd> + Send>)>;
 
     /// socket - create an endpoint for communication
     fn socket(&mut self, proc: &CapturedProcess, domain: c_int, ty: c_int, protocol: c_int) -> nix::Result<Fd>;

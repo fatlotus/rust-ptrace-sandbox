@@ -52,6 +52,15 @@ The following tests verify functionality:
 - `tests/fork_test.rs`: Process creation interception (fork, vfork, clone).
 - `tests/networking.rs`: Networking interception (socket, bind, accept, connect).
 
+## Parallel Tracing
+
+The interceptor now supports parallel tracing of multi-process and multi-threaded applications. 
+- Each process and thread is served by its own instance of the `Linux` trait.
+- Tracing loops run in separate host threads to allow concurrent tracee execution.
+- Per-process/thread state (like file descriptor maps) is isolated.
+
+This is verified by the `networking` test, which spawns a background thread to handle socket operations concurrently with the main thread.
+
 ## Limitations
 
 - The `Passthru` implementation of `exit` and `exit_group` now correctly passes the syscall to the child process instead of killing the tracer.
