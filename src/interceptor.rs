@@ -696,7 +696,9 @@ where
             }
         }
         Some(other_system_call) => {
-            eprintln!("Child {} got an unknown system call: {}", pid, other_system_call);
+            if handler.is_verbose() {
+                eprintln!("Child {} got an unknown system call: {}", pid, other_system_call);
+            }
             None
         }
         _ => None,

@@ -388,9 +388,8 @@ impl Linux<PassthruFd> for Passthru {
         }
         Ok(res as usize)
     }
+
+    fn is_verbose(&self) -> bool {
+        self.verbose
+    }
 }
-
-
-
-
-

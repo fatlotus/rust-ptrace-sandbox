@@ -156,7 +156,10 @@ pub trait Linux<Fd> {
     fn geteuid(&mut self, proc: &CapturedProcess) -> nix::Result<c_int>;
 
     /// getrandom - obtain a series of random bytes
-    fn getrandom(&mut self, proc: &CapturedProcess, buf: &mut [u8], flags: c_int) -> nix::Result<usize>;
+    fn getrandom(&mut self, proc: &CapturedProcess, buf: &mut [u8], flags: i32) -> nix::Result<usize>;
+
+    /// is_verbose - check if verbose logging is enabled
+    fn is_verbose(&self) -> bool;
 }
 
 #[derive(Debug, Clone, Copy, Default)]

@@ -205,4 +205,8 @@ impl Linux<PassthruFd> for Deterministic {
         }
         Ok(buf.len())
     }
+
+    fn is_verbose(&self) -> bool {
+        self.passthru.verbose
+    }
 }
