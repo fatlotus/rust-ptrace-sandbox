@@ -84,14 +84,21 @@ fn parent_loop<L: Linux>(initial_child: Pid, handler: &mut L) {
                 if !state.in_syscall {
                     // Syscall Entry
                     if let Some(res) = handle_syscall_entry(pid, handler) {
-                        state.saved_result = res;
-                        let mut regs = ptrace::getregs(pid).expect("Failed to get regs");
-                        regs.orig_rax = u64::MAX; // -1 as u64
-                        ptrace::setregs(pid, regs).expect("Failed to set regs");
+                        // The syscall was already executed inside handle_syscall_entry
+                        // We are now at the exit stop (if still alive).
+                        if let Ok(mut regs) = ptrace::getregs(pid) {
+                            regs.rax = res as u64;
+                            ptrace::setregs(pid, regs).expect("Failed to set regs");
+                            state.in_syscall = false;
+                        } else {
+                            // Process likely exited during syscall injection
+                            tracees.remove(&pid);
+                            continue;
+                        }
                     } else {
                         state.saved_result = -123456; // Sentinel for "did not replace"
+                        state.in_syscall = true;
                     }
-                    state.in_syscall = true;
                 } else {
                     // Syscall Exit
                     if state.saved_result != -123456 {
@@ -140,7 +147,8 @@ fn parent_loop<L: Linux>(initial_child: Pid, handler: &mut L) {
 }
 
 fn handle_syscall_entry<L: Linux>(pid: Pid, handler: &mut L) -> Option<i64> {
-    let regs = ptrace::getregs(pid).expect("Failed to get regs");
+    let proc = crate::captured::CapturedProcess::new(pid);
+    let regs = proc.get_regs().expect("Failed to get regs");
     let syscall_no = regs.orig_rax;
     let sysno = Sysno::new(syscall_no as usize);
 
@@ -148,15 +156,17 @@ fn handle_syscall_entry<L: Linux>(pid: Pid, handler: &mut L) -> Option<i64> {
         Some(Sysno::read) => {
             let fd = regs.rdi as i32;
             let count = regs.rdx as usize;
-            let _ = handler.read(fd, count);
-            None // Passthru: let the real syscall handle the memory move
+            match handler.read(&proc, fd, count) {
+                Ok(buf) => Some(buf.len() as i64),
+                Err(err) => Some(-(err as i32) as i64),
+            }
         }
         Some(Sysno::write) => {
             let fd = regs.rdi as i32;
             let addr = regs.rsi as usize;
             let count = regs.rdx as usize;
-            let buf = read_memory(pid, addr, count);
-            match handler.write(fd, &buf) {
+            let buf = proc.read_memory(addr, count);
+            match handler.write(&proc, fd, &buf) {
                 Ok(res) => Some(res as i64),
                 Err(err) => Some(-(err as i32) as i64),
             }
@@ -166,18 +176,24 @@ fn handle_syscall_entry<L: Linux>(pid: Pid, handler: &mut L) -> Option<i64> {
             let flags = regs.rsi as i32;
             let mode = regs.rdx as libc::mode_t;
             let pathname = read_string(pid, addr);
-            let _ = handler.open(&pathname, flags, mode);
-            None // Passthru
+            match handler.open(&proc, &pathname, flags, mode) {
+                Ok(res) => Some(res as i64),
+                Err(err) => Some(-(err as i32) as i64),
+            }
         }
         Some(Sysno::close) => {
             let fd = regs.rdi as i32;
-            let _ = handler.close(fd);
-            None // Passthru
+            match handler.close(&proc, fd) {
+                Ok(res) => Some(res as i64),
+                Err(err) => Some(-(err as i32) as i64),
+            }
         }
         Some(Sysno::fstat) => {
             let fd = regs.rdi as i32;
-            let _ = handler.fstat(fd);
-            None // Passthru
+            match handler.fstat(&proc, fd) {
+                Ok(res) => Some(res as i64),
+                Err(err) => Some(-(err as i32) as i64),
+            }
         }
         Some(Sysno::mmap) => {
             let addr = regs.rdi as *mut libc::c_void;
@@ -186,24 +202,32 @@ fn handle_syscall_entry<L: Linux>(pid: Pid, handler: &mut L) -> Option<i64> {
             let flags = regs.r10 as i32;
             let fd = regs.r8 as i32;
             let offset = regs.r9 as libc::off_t;
-            let _ = handler.mmap(addr, length, prot, flags, fd, offset);
-            None // Passthru
+            match handler.mmap(&proc, addr, length, prot, flags, fd, offset) {
+                Ok(res) => Some(res as i64),
+                Err(err) => Some(-(err as i32) as i64),
+            }
         }
         Some(Sysno::munmap) => {
             let addr = regs.rdi as *mut libc::c_void;
             let length = regs.rsi as usize;
-            let _ = handler.munmap(addr, length);
-            None // Passthru
+            match handler.munmap(&proc, addr, length) {
+                Ok(res) => Some(res as i64),
+                Err(err) => Some(-(err as i32) as i64),
+            }
         }
         Some(Sysno::brk) => {
             let addr = regs.rdi as *mut libc::c_void;
-            let _ = handler.brk(addr);
-            None // Passthru
+            match handler.brk(&proc, addr) {
+                Ok(res) => Some(res as i64),
+                Err(err) => Some(-(err as i32) as i64),
+            }
         }
         Some(Sysno::clock_gettime) => {
             let clk_id = regs.rdi as libc::clockid_t;
-            let _ = handler.clock_gettime(clk_id);
-            None // Passthru
+            match handler.clock_gettime(&proc, clk_id) {
+                Ok(res) => Some(res as i64),
+                Err(err) => Some(-(err as i32) as i64),
+            }
         }
         Some(Sysno::openat) => {
             let dirfd = regs.rdi as i32;
@@ -211,93 +235,101 @@ fn handle_syscall_entry<L: Linux>(pid: Pid, handler: &mut L) -> Option<i64> {
             let flags = regs.rdx as i32;
             let mode = regs.r10 as libc::mode_t;
             let pathname = read_string(pid, addr);
-            let _ = handler.openat(dirfd, &pathname, flags, mode);
-            None // Passthru
+            match handler.openat(&proc, dirfd, &pathname, flags, mode) {
+                Ok(res) => Some(res as i64),
+                Err(err) => Some(-(err as i32) as i64),
+            }
         }
         Some(Sysno::newfstatat) => {
             let dirfd = regs.rdi as i32;
             let addr = regs.rsi as usize;
             let flags = regs.r10 as i32;
             let pathname = read_string(pid, addr);
-            let _ = handler.newfstatat(dirfd, &pathname, flags);
-            None // Passthru
-        }
-        Some(Sysno::futex) => {
-            let uaddr = regs.rdi as *mut i32;
-            let op = regs.rsi as i32;
-            let val = regs.rdx as i32;
-            println!("futex({:?}, {}, {}, ...) = passthru", uaddr, op, val);
-            None // Passthru
+            match handler.newfstatat(&proc, dirfd, &pathname, flags) {
+                Ok(res) => Some(res as i64),
+                Err(err) => Some(-(err as i32) as i64),
+            }
         }
         Some(Sysno::exit) => {
             let status = regs.rdi as i32;
-            let _ = handler.exit(status);
-            None // Passthru: let the child actually exit!
+            let _ = handler.exit(&proc, status);
+            Some(0)
         }
         Some(Sysno::exit_group) => {
             let status = regs.rdi as i32;
-            let _ = handler.exit_group(status);
-            None // Passthru: let the child actually exit!
+            let _ = handler.exit_group(&proc, status);
+            Some(0)
         }
         Some(Sysno::fork) => {
-            let _ = handler.fork();
+            let _ = handler.fork(&proc);
             None
         }
         Some(Sysno::vfork) => {
-            let _ = handler.vfork();
+            let _ = handler.vfork(&proc);
             None
         }
         Some(Sysno::clone) => {
             let flags = regs.rdi as i32;
-            let _ = handler.clone(flags);
+            let _ = handler.clone(&proc, flags);
             None
         }
         Some(Sysno::clone3) => {
-            // Mapping clone3 to clone for logging
-            let _ = handler.clone(0);
+            let _ = handler.clone(&proc, 0);
             None
         }
         Some(Sysno::socket) => {
             let domain = regs.rdi as i32;
             let ty = regs.rsi as i32;
             let protocol = regs.rdx as i32;
-            let _ = handler.socket(domain, ty, protocol);
-            None // Passthru
+            match handler.socket(&proc, domain, ty, protocol) {
+                Ok(res) => Some(res as i64),
+                Err(err) => Some(-(err as i32) as i64),
+            }
         }
         Some(Sysno::bind) => {
             let fd = regs.rdi as i32;
             let addr = regs.rsi as *const libc::sockaddr;
             let len = regs.rdx as libc::socklen_t;
-            let _ = handler.bind(fd, addr, len);
-            None // Passthru
+            match handler.bind(&proc, fd, addr, len) {
+                Ok(res) => Some(res as i64),
+                Err(err) => Some(-(err as i32) as i64),
+            }
         }
         Some(Sysno::listen) => {
             let fd = regs.rdi as i32;
             let backlog = regs.rsi as i32;
-            let _ = handler.listen(fd, backlog);
-            None // Passthru
+            match handler.listen(&proc, fd, backlog) {
+                Ok(res) => Some(res as i64),
+                Err(err) => Some(-(err as i32) as i64),
+            }
         }
         Some(Sysno::accept) => {
             let fd = regs.rdi as i32;
             let addr = regs.rsi as *mut libc::sockaddr;
             let len = regs.rdx as *mut libc::socklen_t;
-            let _ = handler.accept(fd, addr, len);
-            None // Passthru
+            match handler.accept(&proc, fd, addr, len) {
+                Ok(res) => Some(res as i64),
+                Err(err) => Some(-(err as i32) as i64),
+            }
         }
         Some(Sysno::accept4) => {
             let fd = regs.rdi as i32;
             let addr = regs.rsi as *mut libc::sockaddr;
             let len = regs.rdx as *mut libc::socklen_t;
             let flags = regs.r10 as i32;
-            let _ = handler.accept4(fd, addr, len, flags);
-            None // Passthru
+            match handler.accept4(&proc, fd, addr, len, flags) {
+                Ok(res) => Some(res as i64),
+                Err(err) => Some(-(err as i32) as i64),
+            }
         }
         Some(Sysno::connect) => {
             let fd = regs.rdi as i32;
             let addr = regs.rsi as *const libc::sockaddr;
             let len = regs.rdx as libc::socklen_t;
-            let _ = handler.connect(fd, addr, len);
-            None // Passthru
+            match handler.connect(&proc, fd, addr, len) {
+                Ok(res) => Some(res as i64),
+                Err(err) => Some(-(err as i32) as i64),
+            }
         }
         Some(Sysno::setsockopt) => {
             let fd = regs.rdi as i32;
@@ -305,15 +337,19 @@ fn handle_syscall_entry<L: Linux>(pid: Pid, handler: &mut L) -> Option<i64> {
             let optname = regs.rdx as i32;
             let optval = regs.r10 as *const libc::c_void;
             let optlen = regs.r8 as libc::socklen_t;
-            let _ = handler.setsockopt(fd, level, optname, optval, optlen);
-            None // Passthru
+            match handler.setsockopt(&proc, fd, level, optname, optval, optlen) {
+                Ok(res) => Some(res as i64),
+                Err(err) => Some(-(err as i32) as i64),
+            }
         }
         Some(Sysno::getsockname) => {
             let fd = regs.rdi as i32;
             let addr = regs.rsi as *mut libc::sockaddr;
             let len = regs.rdx as *mut libc::socklen_t;
-            let _ = handler.getsockname(fd, addr, len);
-            None // Passthru
+            match handler.getsockname(&proc, fd, addr, len) {
+                Ok(res) => Some(res as i64),
+                Err(err) => Some(-(err as i32) as i64),
+            }
         }
         _ => None,
     }
@@ -333,17 +369,4 @@ fn read_string(pid: Pid, addr: usize) -> String {
         }
         current_addr += 8;
     }
-}
-
-fn read_memory(pid: Pid, addr: usize, count: usize) -> Vec<u8> {
-    let mut data = Vec::with_capacity(count);
-    let mut read = 0;
-    while read < count {
-        let word = ptrace::read(pid, (addr + read) as *mut _).unwrap_or(0);
-        let to_copy = std::cmp::min(count - read, std::mem::size_of::<libc::c_long>());
-        let bytes: [u8; 8] = word.to_ne_bytes();
-        data.extend_from_slice(&bytes[..to_copy]);
-        read += to_copy;
-    }
-    data
 }

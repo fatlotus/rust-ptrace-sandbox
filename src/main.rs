@@ -2,6 +2,7 @@ mod linux;
 mod passthru;
 mod interceptor;
 mod vdso;
+mod captured;
 
 use passthru::Passthru;
 use interceptor::run_with_interceptor;

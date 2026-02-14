@@ -27,10 +27,11 @@ close(3) = 0
 
 ## Code Layout
 
-- `src/linux.rs`: The `Linux` trait which defines system calls (`read`, `write`, `open`, `close`, `brk`, `mmap`, `clock_gettime`, etc.). It now returns `nix::Result` for better error handling and includes manpage documentation.
-- `src/passthru.rs`: A "passthru" implementation of the `Linux` trait that logs and forwards syscalls to the native OS, converting `libc` errors to `nix::Result`.
-- `src/vdso.rs`: Logic to disable the virtual Dynamic Shared Object (vDSO) in tracee processes. This ensures that syscalls like `clock_gettime` are forced to go through the kernel where they can be intercepted.
-- `src/interceptor.rs`: The core logic that handles the ptrace loop. It includes a `waitpid` timeout (1 second) to prevent hangs and safely terminates stalling child processes.
+- `src/linux.rs`: The `Linux` trait which defines system calls. It now returns `nix::Result` and each method receives a `&CapturedProcess` to interact with the tracee.
+- `src/passthru.rs`: A "passthru" implementation of the `Linux` trait that logs and forwards syscalls to the native OS by executing them directly in the tracee context via `CapturedProcess`.
+- `src/captured.rs`: The `CapturedProcess` struct which encapsulates `ptrace` operations, providing high-level methods for system call injection and memory access in the tracee.
+- `src/vdso.rs`: Logic to disable the virtual Dynamic Shared Object (vDSO) in tracee processes.
+- `src/interceptor.rs`: The core logic that handles the ptrace loop and dispatches events to the `Linux` trait.
 - `src/main.rs`: The CLI entry point.
 
 ## Testing
