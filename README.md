@@ -51,6 +51,7 @@ The following tests verify functionality:
 - `tests/date_test.rs`: Time interception (clock_gettime).
 - `tests/fork_test.rs`: Process creation interception (fork, vfork, clone).
 - `tests/networking.rs`: Networking interception (socket, bind, accept, connect).
+- `tests/sqlite_test.rs`: SQLite3 support (lseek, unlink, pwrite64, fsync, fdatasync, getcwd).
 
 ## Parallel Tracing
 

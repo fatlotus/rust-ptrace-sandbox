@@ -223,7 +223,71 @@ impl Linux<PassthruFd> for Passthru {
         Ok(res as c_int)
     }
 
+    fn lseek(&mut self, proc: &CapturedProcess, fd: PassthruFd, offset: off_t, whence: c_int) -> nix::Result<off_t> {
+        let res = proc.lseek(fd.0, offset, whence)?;
+        println!("lseek({}, {}, {}) = {}", fd.0, offset, whence, res);
+        Ok(res as off_t)
+    }
 
+    fn unlink(&mut self, proc: &CapturedProcess, pathname: &str) -> nix::Result<c_int> {
+        let regs = proc.get_regs()?;
+        let res = proc.unlink(regs.rdi as u64)?;
+        println!("unlink({:?}) = {}", pathname, res);
+        Ok(res as c_int)
+    }
+
+    fn pwrite(&mut self, proc: &CapturedProcess, fd: PassthruFd, buf: &[u8], offset: off_t) -> nix::Result<usize> {
+        let regs = proc.get_regs()?;
+        let res = proc.pwrite(fd.0, regs.rsi, buf.len(), offset)?;
+        println!("pwrite({}, ..., {}) = {}", fd.0, buf.len(), res);
+        Ok(res as usize)
+    }
+
+    fn fsync(&mut self, proc: &CapturedProcess, fd: PassthruFd) -> nix::Result<c_int> {
+        let res = proc.fsync(fd.0)?;
+        println!("fsync({}) = {}", fd.0, res);
+        Ok(res as c_int)
+    }
+
+    fn fdatasync(&mut self, proc: &CapturedProcess, fd: PassthruFd) -> nix::Result<c_int> {
+        let res = proc.fdatasync(fd.0)?;
+        println!("fdatasync({}) = {}", fd.0, res);
+        Ok(res as c_int)
+    }
+
+    fn getcwd(&mut self, proc: &CapturedProcess, size: usize) -> nix::Result<Vec<u8>> {
+        let regs = proc.get_regs()?;
+        let res = proc.getcwd(regs.rdi, size)?;
+        println!("getcwd({:?}...) = {}", regs.rdi, res);
+        if res > 0 {
+             Ok(proc.read_memory(regs.rdi as usize, res as usize)) // This includes null terminator usually?
+             // getcwd returns len including null byte? or just len?
+             // man getcwd(2): returns length of string including null byte.
+        } else {
+             Ok(Vec::new())
+        }
+    }
+
+    fn getpid(&mut self, proc: &CapturedProcess) -> nix::Result<c_int> {
+        let res = proc.getpid()?;
+        println!("getpid() = {}", res);
+        Ok(res as c_int)
+    }
+
+    fn getuid(&mut self, proc: &CapturedProcess) -> nix::Result<c_int> {
+        let res = proc.getuid()?;
+        println!("getuid() = {}", res);
+        Ok(res as c_int)
+    }
+
+    fn geteuid(&mut self, proc: &CapturedProcess) -> nix::Result<c_int> {
+        let res = proc.geteuid()?;
+        println!("geteuid() = {}", res);
+        Ok(res as c_int)
+    }
 }
+
+
+
 
 

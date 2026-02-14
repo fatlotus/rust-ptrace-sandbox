@@ -539,6 +539,81 @@ where
                 Err(err) => Some(-(err as i32) as i64),
             }
         }
+        Some(Sysno::lseek) => {
+            let fd = get_fd(state, regs.rdi as i32);
+            let offset = regs.rsi as libc::off_t;
+            let whence = regs.rdx as i32;
+            match handler.lseek(&proc, fd, offset, whence) {
+                Ok(res) => Some(res as i64),
+                Err(err) => Some(-(err as i32) as i64),
+            }
+        }
+        Some(Sysno::unlink) => {
+            let addr = regs.rdi as usize;
+            let pathname = read_string(pid, addr);
+            match handler.unlink(&proc, &pathname) {
+                Ok(res) => Some(res as i64),
+                Err(err) => Some(-(err as i32) as i64),
+            }
+        }
+        Some(Sysno::pwrite64) => {
+            let fd = get_fd(state, regs.rdi as i32);
+            let addr = regs.rsi as usize;
+            let count = regs.rdx as usize;
+            let offset = regs.r10 as libc::off_t;
+            let buf = proc.read_memory(addr, count);
+            match handler.pwrite(&proc, fd, &buf, offset) {
+                Ok(res) => Some(res as i64),
+                Err(err) => Some(-(err as i32) as i64),
+            }
+        }
+        Some(Sysno::fsync) => {
+            let fd = get_fd(state, regs.rdi as i32);
+            match handler.fsync(&proc, fd) {
+                Ok(res) => Some(res as i64),
+                Err(err) => Some(-(err as i32) as i64),
+            }
+        }
+        Some(Sysno::fdatasync) => {
+            let fd = get_fd(state, regs.rdi as i32);
+            match handler.fdatasync(&proc, fd) {
+                Ok(res) => Some(res as i64),
+                Err(err) => Some(-(err as i32) as i64),
+            }
+        }
+        Some(Sysno::getcwd) => {
+            let buf_addr = regs.rdi as usize;
+            let size = regs.rsi as usize;
+            match handler.getcwd(&proc, size) {
+                Ok(buf) => {
+                     if buf.len() > 0 {
+                         write_bytes(pid, buf_addr, &buf);
+                         Some(buf.len() as i64) 
+                     } else {
+                         Some(0)
+                     }
+                },
+                Err(err) => Some(-(err as i32) as i64),
+            }
+        }
+        Some(Sysno::getpid) => {
+            match handler.getpid(&proc) {
+                Ok(res) => Some(res as i64),
+                Err(err) => Some(-(err as i32) as i64),
+            }
+        }
+        Some(Sysno::getuid) => {
+            match handler.getuid(&proc) {
+                Ok(res) => Some(res as i64),
+                Err(err) => Some(-(err as i32) as i64),
+            }
+        }
+        Some(Sysno::geteuid) => {
+            match handler.geteuid(&proc) {
+                Ok(res) => Some(res as i64),
+                Err(err) => Some(-(err as i32) as i64),
+            }
+        }
         Some(other_system_call) => {
             eprintln!("Child {} got an unknown system call: {}", pid, other_system_call);
             None

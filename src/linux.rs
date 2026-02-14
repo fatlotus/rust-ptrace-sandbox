@@ -117,6 +117,33 @@ pub trait Linux<Fd: Clone + Copy + std::fmt::Debug + From<i32>> {
 
     /// fcntl - manipulate file descriptor
     fn fcntl(&mut self, proc: &CapturedProcess, fd: Fd, cmd: c_int, arg: libc::c_ulong) -> nix::Result<c_int>;
+
+    /// lseek - reposition read/write file offset
+    fn lseek(&mut self, proc: &CapturedProcess, fd: Fd, offset: off_t, whence: c_int) -> nix::Result<off_t>;
+
+    /// unlink - delete a name and possibly the file it refers to
+    fn unlink(&mut self, proc: &CapturedProcess, pathname: &str) -> nix::Result<c_int>;
+
+    /// pwrite64 - write to a file descriptor at a given offset
+    fn pwrite(&mut self, proc: &CapturedProcess, fd: Fd, buf: &[u8], offset: off_t) -> nix::Result<usize>;
+
+    /// fsync - synchronize a file's in-core state with storage device
+    fn fsync(&mut self, proc: &CapturedProcess, fd: Fd) -> nix::Result<c_int>;
+
+    /// fdatasync - synchronize a file's in-core state with storage device
+    fn fdatasync(&mut self, proc: &CapturedProcess, fd: Fd) -> nix::Result<c_int>;
+
+    /// getcwd - get current working directory
+    fn getcwd(&mut self, proc: &CapturedProcess, size: usize) -> nix::Result<Vec<u8>>;
+
+    /// getpid - get process identification
+    fn getpid(&mut self, proc: &CapturedProcess) -> nix::Result<c_int>;
+
+    /// getuid - get user identification
+    fn getuid(&mut self, proc: &CapturedProcess) -> nix::Result<c_int>;
+
+    /// geteuid - get effective user identification
+    fn geteuid(&mut self, proc: &CapturedProcess) -> nix::Result<c_int>;
 }
 
 #[derive(Debug, Clone, Copy, Default)]

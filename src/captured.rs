@@ -164,4 +164,40 @@ impl CapturedProcess {
     pub fn fcntl(&self, fd: c_int, cmd: c_int, arg: libc::c_ulong) -> Result<i64> {
         self.syscall(libc::SYS_fcntl as u64, fd as u64, cmd as u64, arg as u64, 0, 0, 0)
     }
+
+    pub fn lseek(&self, fd: c_int, offset: off_t, whence: c_int) -> Result<i64> {
+        self.syscall(libc::SYS_lseek as u64, fd as u64, offset as u64, whence as u64, 0, 0, 0)
+    }
+
+    pub fn unlink(&self, addr: u64) -> Result<i64> {
+        self.syscall(libc::SYS_unlink as u64, addr, 0, 0, 0, 0, 0)
+    }
+
+    pub fn pwrite(&self, fd: c_int, addr: u64, count: usize, offset: off_t) -> Result<i64> {
+        self.syscall(libc::SYS_pwrite64 as u64, fd as u64, addr, count as u64, offset as u64, 0, 0)
+    }
+
+    pub fn fsync(&self, fd: c_int) -> Result<i64> {
+        self.syscall(libc::SYS_fsync as u64, fd as u64, 0, 0, 0, 0, 0)
+    }
+
+    pub fn fdatasync(&self, fd: c_int) -> Result<i64> {
+        self.syscall(libc::SYS_fdatasync as u64, fd as u64, 0, 0, 0, 0, 0)
+    }
+
+    pub fn getcwd(&self, buf: u64, size: usize) -> Result<i64> {
+        self.syscall(libc::SYS_getcwd as u64, buf, size as u64, 0, 0, 0, 0)
+    }
+
+    pub fn getpid(&self) -> Result<i64> {
+        self.syscall(libc::SYS_getpid as u64, 0, 0, 0, 0, 0, 0)
+    }
+
+    pub fn getuid(&self) -> Result<i64> {
+        self.syscall(libc::SYS_getuid as u64, 0, 0, 0, 0, 0, 0)
+    }
+
+    pub fn geteuid(&self) -> Result<i64> {
+        self.syscall(libc::SYS_geteuid as u64, 0, 0, 0, 0, 0, 0)
+    }
 }
