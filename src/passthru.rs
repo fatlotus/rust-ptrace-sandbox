@@ -1,4 +1,4 @@
-use crate::linux::Linux;
+use crate::linux::{Linux, PollFd};
 use crate::captured::CapturedProcess;
 use libc::{c_int, c_void, mode_t, off_t};
 
@@ -160,6 +160,54 @@ impl Linux<PassthruFd> for Passthru {
         let regs = proc.get_regs()?;
         let res = proc.getsockname(fd.0, regs.rsi, regs.rdx)?;
         println!("getsockname({}, {:?}, {:?}) = {}", fd.0, addr, len, res);
+        Ok(res as c_int)
+    }
+
+    fn pread(&mut self, proc: &CapturedProcess, fd: PassthruFd, count: usize, offset: off_t) -> nix::Result<Vec<u8>> {
+        let regs = proc.get_regs()?;
+        let res = proc.pread(fd.0, regs.rsi, count, offset)?;
+        let buf = proc.read_memory(regs.rsi as usize, res as usize);
+        println!("pread({}, ..., {}, {}) = {}", fd.0, count, offset, res);
+        Ok(buf)
+    }
+
+    fn poll(&mut self, proc: &CapturedProcess, fds: &mut [PollFd<PassthruFd>], timeout: c_int) -> nix::Result<c_int> {
+        let regs = proc.get_regs()?;
+        let res = proc.poll(regs.rdi, fds.len() as libc::nfds_t, timeout)?;
+        
+        // Update fds from guest memory to ensure revents are captured
+        let addr = regs.rdi as usize;
+        let pollfd_size = std::mem::size_of::<libc::pollfd>();
+        for (i, fd) in fds.iter_mut().enumerate() {
+            let fd_addr = addr + i * pollfd_size;
+            // revents is at offset 6 (4 bytes fd + 2 bytes events)
+            let revents_bytes = proc.read_memory(fd_addr + 6, 2);
+            if revents_bytes.len() == 2 {
+                fd.revents = i16::from_ne_bytes([revents_bytes[0], revents_bytes[1]]);
+            }
+        }
+        println!("poll(..., {}, {}) = {}", fds.len(), timeout, res);
+        Ok(res as c_int)
+    }
+
+    fn sendto(&mut self, proc: &CapturedProcess, fd: PassthruFd, buf: &[u8], flags: c_int, addr: *const libc::sockaddr, len: libc::socklen_t) -> nix::Result<usize> {
+        let regs = proc.get_regs()?;
+        let res = proc.sendto(fd.0, regs.rsi, buf.len(), flags, regs.r8, regs.r9 as libc::socklen_t)?;
+        println!("sendto({}, ..., {}, ...) = {}", fd.0, buf.len(), res);
+        Ok(res as usize)
+    }
+
+    fn recvfrom(&mut self, proc: &CapturedProcess, fd: PassthruFd, count: usize, flags: c_int, _addr: *mut libc::sockaddr, _len: *mut libc::socklen_t) -> nix::Result<Vec<u8>> {
+        let regs = proc.get_regs()?;
+        let res = proc.recvfrom(fd.0, regs.rsi, count, flags, regs.r8, regs.r9)?;
+        let buf = proc.read_memory(regs.rsi as usize, res as usize);
+        println!("recvfrom({}, ..., {}) = {}", fd.0, count, res);
+        Ok(buf)
+    }
+
+    fn fcntl(&mut self, proc: &CapturedProcess, fd: PassthruFd, cmd: c_int, arg: libc::c_ulong) -> nix::Result<c_int> {
+        let res = proc.fcntl(fd.0, cmd, arg)?;
+        println!("fcntl({}, {}, {}) = {}", fd.0, cmd, arg, res);
         Ok(res as c_int)
     }
 

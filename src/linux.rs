@@ -108,6 +108,29 @@ pub trait Linux<Fd: Clone + Copy + std::fmt::Debug> {
 
     /// unwrap_fd - unwrap the generic Fd type into a raw file descriptor
     fn unwrap_fd(&self, fd: Fd) -> c_int;
+
+    /// pread - read from or write to a file descriptor at a given offset
+    fn pread(&mut self, proc: &CapturedProcess, fd: Fd, count: usize, offset: off_t) -> nix::Result<Vec<u8>>;
+
+    /// poll - wait for some event on a file descriptor
+    fn poll(&mut self, proc: &CapturedProcess, fds: &mut [PollFd<Fd>], timeout: c_int) -> nix::Result<c_int>;
+
+    /// sendto - send a message on a socket
+    fn sendto(&mut self, proc: &CapturedProcess, fd: Fd, buf: &[u8], flags: c_int, addr: *const libc::sockaddr, len: libc::socklen_t) -> nix::Result<usize>;
+
+    /// recvfrom - receive a message from a socket
+    fn recvfrom(&mut self, proc: &CapturedProcess, fd: Fd, count: usize, flags: c_int, addr: *mut libc::sockaddr, len: *mut libc::socklen_t) -> nix::Result<Vec<u8>>;
+
+    /// fcntl - manipulate file descriptor
+    fn fcntl(&mut self, proc: &CapturedProcess, fd: Fd, cmd: c_int, arg: libc::c_ulong) -> nix::Result<c_int>;
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+#[repr(C)]
+pub struct PollFd<Fd> {
+    pub fd: Fd,
+    pub events: i16,
+    pub revents: i16,
 }
 
 

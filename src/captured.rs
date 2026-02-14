@@ -140,4 +140,24 @@ impl CapturedProcess {
     pub fn getsockname(&self, fd: c_int, addr: u64, len_addr: u64) -> nix::Result<i64> {
         self.syscall(libc::SYS_getsockname as u64, fd as u64, addr, len_addr, 0, 0, 0)
     }
+
+    pub fn pread(&self, fd: c_int, addr: u64, count: usize, offset: off_t) -> Result<i64> {
+        self.syscall(libc::SYS_pread64 as u64, fd as u64, addr, count as u64, offset as u64, 0, 0)
+    }
+
+    pub fn poll(&self, fds_addr: u64, nfds: libc::nfds_t, timeout: c_int) -> Result<i64> {
+        self.syscall(libc::SYS_poll as u64, fds_addr, nfds as u64, timeout as u64, 0, 0, 0)
+    }
+
+    pub fn sendto(&self, fd: c_int, buf_addr: u64, len: usize, flags: c_int, dest_addr: u64, addrlen: libc::socklen_t) -> Result<i64> {
+        self.syscall(libc::SYS_sendto as u64, fd as u64, buf_addr, len as u64, flags as u64, dest_addr, addrlen as u64)
+    }
+
+    pub fn recvfrom(&self, fd: c_int, buf_addr: u64, len: usize, flags: c_int, src_addr: u64, addrlen: u64) -> Result<i64> {
+        self.syscall(libc::SYS_recvfrom as u64, fd as u64, buf_addr, len as u64, flags as u64, src_addr, addrlen)
+    }
+
+    pub fn fcntl(&self, fd: c_int, cmd: c_int, arg: libc::c_ulong) -> Result<i64> {
+        self.syscall(libc::SYS_fcntl as u64, fd as u64, cmd as u64, arg as u64, 0, 0, 0)
+    }
 }
