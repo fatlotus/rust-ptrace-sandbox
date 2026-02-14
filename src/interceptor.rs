@@ -13,12 +13,13 @@ struct ChildState<Fd> {
     in_syscall: bool,
     saved_result: i64,
     fd_map: HashMap<c_int, Fd>,
+    next_fd: c_int,
     pending_child_handler: Option<Box<dyn Linux<Fd> + Send>>,
 }
 
 pub fn run_with_interceptor<Fd, L>(cmd: &str, args: &[&str], handler: L)
 where
-    Fd: Clone + Copy + std::fmt::Debug + Send + 'static,
+    Fd: Clone + Copy + std::fmt::Debug + Send + 'static + From<i32>,
     L: Linux<Fd> + Send + 'static,
 {
     match unsafe { fork() } {
@@ -59,14 +60,18 @@ fn wait_pid_with_timeout(pid: Pid) -> WaitStatus {
 
 fn parent_loop<Fd>(initial_child: Pid, handler: Box<dyn Linux<Fd> + Send>)
 where
-    Fd: Clone + Copy + std::fmt::Debug + Send + 'static,
+    Fd: Clone + Copy + std::fmt::Debug + Send + 'static + From<i32>,
 {
-    tracee_loop(initial_child, handler, true);
+    let mut fd_map = HashMap::new();
+    fd_map.insert(0, Fd::from(0));
+    fd_map.insert(1, Fd::from(1));
+    fd_map.insert(2, Fd::from(2));
+    tracee_loop(initial_child, handler, fd_map, 3, true);
 }
 
-fn tracee_loop<Fd>(pid: Pid, mut handler: Box<dyn Linux<Fd> + Send>, is_initial: bool)
+fn tracee_loop<Fd>(pid: Pid, mut handler: Box<dyn Linux<Fd> + Send>, fd_map: HashMap<c_int, Fd>, next_fd: c_int, is_initial: bool)
 where
-    Fd: Clone + Copy + std::fmt::Debug + Send + 'static,
+    Fd: Clone + Copy + std::fmt::Debug + Send + 'static + From<i32>,
 {
     if is_initial {
         // Initial wait for exec stop
@@ -125,7 +130,8 @@ where
     let mut state = ChildState {
         in_syscall: false,
         saved_result: 0,
-        fd_map: HashMap::new(),
+        fd_map,
+        next_fd,
         pending_child_handler: None,
     };
 
@@ -178,8 +184,10 @@ where
                     let _ = ptrace::detach(new_pid, Some(nix::sys::signal::Signal::SIGSTOP));
 
                     let child_handler = state.pending_child_handler.take().expect("No pending handler for fork");
+                    let child_fd_map = state.fd_map.clone();
+                    let child_next_fd = state.next_fd;
                     std::thread::spawn(move || {
-                        tracee_loop(new_pid, child_handler, false);
+                        tracee_loop(new_pid, child_handler, child_fd_map, child_next_fd, false);
                     });
                 } else if event == ptrace::Event::PTRACE_EVENT_EXEC as i32 {
                     if let Ok(regs) = ptrace::getregs(pid) {
@@ -206,7 +214,7 @@ where
 
 fn handle_syscall_entry<Fd>(pid: Pid, handler: &mut dyn Linux<Fd>, state: &mut ChildState<Fd>) -> Option<i64>
 where
-    Fd: Clone + Copy + std::fmt::Debug,
+    Fd: Clone + Copy + std::fmt::Debug + From<i32>,
 {
     let proc = crate::captured::CapturedProcess::new(pid);
     let regs = proc.get_regs().expect("Failed to get regs");
@@ -215,7 +223,7 @@ where
 
     match sysno {
         Some(Sysno::read) => {
-            let fd = get_fd(state, handler, regs.rdi as i32);
+            let fd = get_fd(state, regs.rdi as i32);
             let count = regs.rdx as usize;
             match handler.read(&proc, fd, count) {
                 Ok(buf) => Some(buf.len() as i64),
@@ -223,7 +231,7 @@ where
             }
         }
         Some(Sysno::write) => {
-            let fd = get_fd(state, handler, regs.rdi as i32);
+            let fd = get_fd(state, regs.rdi as i32);
             let addr = regs.rsi as usize;
             let count = regs.rdx as usize;
             let buf = proc.read_memory(addr, count);
@@ -238,13 +246,13 @@ where
             let mode = regs.rdx as libc::mode_t;
             let pathname = read_string(pid, addr);
             match handler.open(&proc, &pathname, flags, mode) {
-                Ok(res) => Some(register_fd(state, handler, res) as i64),
+                Ok(res) => Some(register_fd(state, res) as i64),
                 Err(err) => Some(-(err as i32) as i64),
             }
         }
         Some(Sysno::close) => {
             let guest_fd = regs.rdi as i32;
-            let fd = get_fd(state, handler, guest_fd);
+            let fd = get_fd(state, guest_fd);
             match handler.close(&proc, fd) {
                 Ok(res) => {
                     state.fd_map.remove(&guest_fd);
@@ -254,7 +262,7 @@ where
             }
         }
         Some(Sysno::fstat) => {
-            let fd = get_fd(state, handler, regs.rdi as i32);
+            let fd = get_fd(state, regs.rdi as i32);
             match handler.fstat(&proc, fd) {
                 Ok(res) => Some(res as i64),
                 Err(err) => Some(-(err as i32) as i64),
@@ -265,7 +273,7 @@ where
             let length = regs.rsi as usize;
             let prot = regs.rdx as i32;
             let flags = regs.r10 as i32;
-            let fd = get_fd(state, handler, regs.r8 as i32);
+            let fd = get_fd(state, regs.r8 as i32);
             let offset = regs.r9 as libc::off_t;
             match handler.mmap(&proc, addr, length, prot, flags, fd, offset) {
                 Ok(res) => Some(res as i64),
@@ -295,18 +303,18 @@ where
             }
         }
         Some(Sysno::openat) => {
-            let dirfd = get_fd(state, handler, regs.rdi as i32);
+            let dirfd = get_fd(state, regs.rdi as i32);
             let addr = regs.rsi as usize;
             let flags = regs.rdx as i32;
             let mode = regs.r10 as libc::mode_t;
             let pathname = read_string(pid, addr);
             match handler.openat(&proc, dirfd, &pathname, flags, mode) {
-                Ok(res) => Some(register_fd(state, handler, res) as i64),
+                Ok(res) => Some(register_fd(state, res) as i64),
                 Err(err) => Some(-(err as i32) as i64),
             }
         }
         Some(Sysno::newfstatat) => {
-            let dirfd = get_fd(state, handler, regs.rdi as i32);
+            let dirfd = get_fd(state, regs.rdi as i32);
             let addr = regs.rsi as usize;
             let flags = regs.r10 as i32;
             let pathname = read_string(pid, addr);
@@ -367,12 +375,12 @@ where
             let ty = regs.rsi as i32;
             let protocol = regs.rdx as i32;
             match handler.socket(&proc, domain, ty, protocol) {
-                Ok(res) => Some(register_fd(state, handler, res) as i64),
+                Ok(res) => Some(register_fd(state, res) as i64),
                 Err(err) => Some(-(err as i32) as i64),
             }
         }
         Some(Sysno::bind) => {
-            let fd = get_fd(state, handler, regs.rdi as i32);
+            let fd = get_fd(state, regs.rdi as i32);
             let addr = regs.rsi as *const libc::sockaddr;
             let len = regs.rdx as libc::socklen_t;
             match handler.bind(&proc, fd, addr, len) {
@@ -381,7 +389,7 @@ where
             }
         }
         Some(Sysno::listen) => {
-            let fd = get_fd(state, handler, regs.rdi as i32);
+            let fd = get_fd(state, regs.rdi as i32);
             let backlog = regs.rsi as i32;
             match handler.listen(&proc, fd, backlog) {
                 Ok(res) => Some(res as i64),
@@ -389,26 +397,26 @@ where
             }
         }
         Some(Sysno::accept) => {
-            let fd = get_fd(state, handler, regs.rdi as i32);
+            let fd = get_fd(state, regs.rdi as i32);
             let addr = regs.rsi as *mut libc::sockaddr;
             let len = regs.rdx as *mut libc::socklen_t;
             match handler.accept(&proc, fd, addr, len) {
-                Ok(res) => Some(register_fd(state, handler, res) as i64),
+                Ok(res) => Some(register_fd(state, res) as i64),
                 Err(err) => Some(-(err as i32) as i64),
             }
         }
         Some(Sysno::accept4) => {
-            let fd = get_fd(state, handler, regs.rdi as i32);
+            let fd = get_fd(state, regs.rdi as i32);
             let addr = regs.rsi as *mut libc::sockaddr;
             let len = regs.rdx as *mut libc::socklen_t;
             let flags = regs.r10 as i32;
             match handler.accept4(&proc, fd, addr, len, flags) {
-                Ok(res) => Some(register_fd(state, handler, res) as i64),
+                Ok(res) => Some(register_fd(state, res) as i64),
                 Err(err) => Some(-(err as i32) as i64),
             }
         }
         Some(Sysno::connect) => {
-            let fd = get_fd(state, handler, regs.rdi as i32);
+            let fd = get_fd(state, regs.rdi as i32);
             let addr = regs.rsi as *const libc::sockaddr;
             let len = regs.rdx as libc::socklen_t;
             match handler.connect(&proc, fd, addr, len) {
@@ -417,7 +425,7 @@ where
             }
         }
         Some(Sysno::setsockopt) => {
-            let fd = get_fd(state, handler, regs.rdi as i32);
+            let fd = get_fd(state, regs.rdi as i32);
             let level = regs.rsi as i32;
             let optname = regs.rdx as i32;
             let optval = regs.r10 as *const libc::c_void;
@@ -428,7 +436,7 @@ where
             }
         }
         Some(Sysno::getsockname) => {
-            let fd = get_fd(state, handler, regs.rdi as i32);
+            let fd = get_fd(state, regs.rdi as i32);
             let addr = regs.rsi as *mut libc::sockaddr;
             let len = regs.rdx as *mut libc::socklen_t;
             match handler.getsockname(&proc, fd, addr, len) {
@@ -437,26 +445,22 @@ where
             }
         }
         Some(Sysno::pread64) => {
-            let fd = get_fd(state, handler, regs.rdi as i32);
-            let addr = regs.rsi as usize; // buf is unused by handler but used by interceptor logic in theory? generic handler takes generic fd.
-            // intercepted pread: handler.pread(&proc, fd, count, offset).
+            let fd = get_fd(state, regs.rdi as i32);
+            let addr = regs.rsi as usize;
             let count = regs.rdx as usize;
             let offset = regs.r10 as libc::off_t;
-            // handler.pread returns Vec<u8> (data read).
-            // We must WRITE this data to guest memory at addr.
             if let Ok(buf) = handler.pread(&proc, fd, count, offset) {
-                 // Write buf to addr
                  write_bytes(pid, addr, &buf);
                  Some(buf.len() as i64)
             } else {
-                 Some(-1) // naive error handling, should propagate errno
+                 Some(-1)
             }
         }
         Some(Sysno::poll) => {
             let fds_addr = regs.rdi as usize;
             let nfds = regs.rsi as usize;
             let timeout = regs.rdx as i32;
-            let mut fds = read_pollfds(pid, fds_addr, nfds, state, handler);
+            let mut fds = read_pollfds(pid, fds_addr, nfds, state);
             match handler.poll(&proc, &mut fds, timeout) {
                 Ok(res) => {
                     write_pollfds(pid, fds_addr, &fds);
@@ -466,7 +470,7 @@ where
             }
         }
         Some(Sysno::sendto) => {
-            let fd = get_fd(state, handler, regs.rdi as i32);
+            let fd = get_fd(state, regs.rdi as i32);
             let buf_addr = regs.rsi as usize;
             let len = regs.rdx as usize;
             let flags = regs.r10 as i32;
@@ -479,8 +483,8 @@ where
             }
         }
         Some(Sysno::recvfrom) => {
-            let fd = get_fd(state, handler, regs.rdi as i32);
-            let buf_addr = regs.rsi as usize; // interceptor writes here
+            let fd = get_fd(state, regs.rdi as i32);
+            let buf_addr = regs.rsi as usize;
             let len = regs.rdx as usize;
             let flags = regs.r10 as i32;
             let src_addr = regs.r8 as *mut libc::sockaddr;
@@ -494,7 +498,7 @@ where
             }
         }
         Some(Sysno::fcntl) => {
-            let fd = get_fd(state, handler, regs.rdi as i32);
+            let fd = get_fd(state, regs.rdi as i32);
             let cmd = regs.rsi as i32;
             let arg = regs.rdx as libc::c_ulong;
             match handler.fcntl(&proc, fd, cmd, arg) {
@@ -510,20 +514,27 @@ where
     }
 }
 
-fn get_fd<Fd, L>(state: &mut ChildState<Fd>, handler: &L, guest_fd: c_int) -> Fd
+fn get_fd<Fd>(state: &ChildState<Fd>, guest_fd: c_int) -> Fd
 where
-    Fd: Clone + Copy + std::fmt::Debug,
-    L: Linux<Fd> + ?Sized,
+    Fd: Clone + Copy + std::fmt::Debug + From<i32>,
 {
-    *state.fd_map.entry(guest_fd).or_insert_with(|| handler.wrap_fd(guest_fd))
+    if guest_fd < 0 {
+        return Fd::from(guest_fd);
+    }
+    match state.fd_map.get(&guest_fd) {
+        Some(fd) => *fd,
+        None => {
+            panic!("Guest FD {} not found in map. Map: {:?}", guest_fd, state.fd_map);
+        }
+    }
 }
 
-fn register_fd<Fd, L>(state: &mut ChildState<Fd>, handler: &L, fd: Fd) -> c_int
+fn register_fd<Fd>(state: &mut ChildState<Fd>, fd: Fd) -> c_int
 where
     Fd: Clone + Copy + std::fmt::Debug,
-    L: Linux<Fd> + ?Sized,
 {
-    let guest_fd = handler.unwrap_fd(fd);
+    let guest_fd = state.next_fd;
+    state.next_fd += 1;
     state.fd_map.insert(guest_fd, fd);
     guest_fd
 }
@@ -569,10 +580,9 @@ fn write_bytes(pid: Pid, addr: usize, bytes: &[u8]) {
     }
 }
 
-fn read_pollfds<Fd, L>(pid: Pid, addr: usize, nfds: usize, state: &mut ChildState<Fd>, handler: &L) -> Vec<PollFd<Fd>>
+fn read_pollfds<Fd>(pid: Pid, addr: usize, nfds: usize, state: &ChildState<Fd>) -> Vec<PollFd<Fd>>
 where
-    Fd: Clone + Copy + std::fmt::Debug,
-    L: Linux<Fd> + ?Sized,
+    Fd: Clone + Copy + std::fmt::Debug + From<i32>,
 {
      let mut fds = Vec::with_capacity(nfds);
      let pollfd_size = std::mem::size_of::<libc::pollfd>();
@@ -587,7 +597,7 @@ where
                  let fd_int = i32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
                  let events = i16::from_ne_bytes([bytes[4], bytes[5]]);
                  let revents = i16::from_ne_bytes([bytes[6], bytes[7]]);
-                 let fd = get_fd(state, handler, fd_int);
+                 let fd = get_fd(state, fd_int);
                  fds.push(PollFd { fd, events, revents });
                  continue;
              }
@@ -599,10 +609,10 @@ where
              let fd_int = i32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
              let events = i16::from_ne_bytes([bytes[4], bytes[5]]);
              let revents = i16::from_ne_bytes([bytes[6], bytes[7]]);
-             let fd = get_fd(state, handler, fd_int);
+             let fd = get_fd(state, fd_int);
              fds.push(PollFd { fd, events, revents });
          } else {
-             let fd = get_fd(state, handler, -1);
+             let fd = get_fd(state, -1);
              fds.push(PollFd { fd, events: 0, revents: 0 });
          }
      }

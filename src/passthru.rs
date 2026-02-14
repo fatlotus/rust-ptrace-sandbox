@@ -5,6 +5,12 @@ use libc::{c_int, c_void, mode_t, off_t};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PassthruFd(pub c_int);
 
+impl From<c_int> for PassthruFd {
+    fn from(fd: c_int) -> Self {
+        PassthruFd(fd)
+    }
+}
+
 pub struct Passthru;
 
 impl Linux<PassthruFd> for Passthru {
@@ -211,13 +217,7 @@ impl Linux<PassthruFd> for Passthru {
         Ok(res as c_int)
     }
 
-    fn wrap_fd(&self, fd: c_int) -> PassthruFd {
-        PassthruFd(fd)
-    }
 
-    fn unwrap_fd(&self, fd: PassthruFd) -> c_int {
-        fd.0
-    }
 }
 
 

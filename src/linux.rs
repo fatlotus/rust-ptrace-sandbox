@@ -1,7 +1,7 @@
 use libc::{c_int, c_void, mode_t, off_t};
 use crate::captured::CapturedProcess;
 
-pub trait Linux<Fd: Clone + Copy + std::fmt::Debug> {
+pub trait Linux<Fd: Clone + Copy + std::fmt::Debug + From<i32>> {
     /// write - write to a file descriptor
     ///
     /// write() writes up to count bytes from the buffer starting at buf to the file referred to by the file descriptor fd.
@@ -104,10 +104,6 @@ pub trait Linux<Fd: Clone + Copy + std::fmt::Debug> {
     fn getsockname(&mut self, proc: &CapturedProcess, fd: Fd, addr: *mut libc::sockaddr, len: *mut libc::socklen_t) -> nix::Result<c_int>;
 
     /// wrap_fd - wrap a raw file descriptor into the generic Fd type
-    fn wrap_fd(&self, fd: c_int) -> Fd;
-
-    /// unwrap_fd - unwrap the generic Fd type into a raw file descriptor
-    fn unwrap_fd(&self, fd: Fd) -> c_int;
 
     /// pread - read from or write to a file descriptor at a given offset
     fn pread(&mut self, proc: &CapturedProcess, fd: Fd, count: usize, offset: off_t) -> nix::Result<Vec<u8>>;

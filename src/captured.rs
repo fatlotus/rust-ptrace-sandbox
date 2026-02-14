@@ -39,7 +39,11 @@ impl CapturedProcess {
         }
         
         let result_regs = self.get_regs()?;
-        Ok(result_regs.rax as i64)
+        if (result_regs.rax as i64) < 0 && (result_regs.rax as i64) > -4096 {
+            Err(nix::errno::Errno::from_raw(-(result_regs.rax as i32)))
+        } else {
+            Ok(result_regs.rax as i64)
+        }
     }
 
     pub fn read_memory(&self, addr: usize, count: usize) -> Vec<u8> {
