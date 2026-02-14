@@ -11,6 +11,12 @@ impl From<c_int> for PassthruFd {
     }
 }
 
+impl std::os::unix::io::AsRawFd for PassthruFd {
+    fn as_raw_fd(&self) -> c_int {
+        self.0
+    }
+}
+
 pub struct Passthru;
 
 impl Linux<PassthruFd> for Passthru {

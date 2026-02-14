@@ -19,7 +19,7 @@ struct ChildState<Fd> {
 
 pub fn run_with_interceptor<Fd, L>(cmd: &str, args: &[&str], handler: L)
 where
-    Fd: Clone + Copy + std::fmt::Debug + Send + 'static + From<i32>,
+    Fd: Clone + Copy + std::fmt::Debug + Send + 'static + From<i32> + std::os::unix::io::AsRawFd,
     L: Linux<Fd> + Send + 'static,
 {
     match unsafe { fork() } {
@@ -60,18 +60,18 @@ fn wait_pid_with_timeout(pid: Pid) -> WaitStatus {
 
 fn parent_loop<Fd>(initial_child: Pid, handler: Box<dyn Linux<Fd> + Send>)
 where
-    Fd: Clone + Copy + std::fmt::Debug + Send + 'static + From<i32>,
+    Fd: Clone + Copy + std::fmt::Debug + Send + 'static + From<i32> + std::os::unix::io::AsRawFd,
 {
     let mut fd_map = HashMap::new();
     fd_map.insert(0, Fd::from(0));
     fd_map.insert(1, Fd::from(1));
     fd_map.insert(2, Fd::from(2));
-    tracee_loop(initial_child, handler, fd_map, 3, true);
+    tracee_loop(initial_child, handler, fd_map, 10000, true);
 }
 
 fn tracee_loop<Fd>(pid: Pid, mut handler: Box<dyn Linux<Fd> + Send>, fd_map: HashMap<c_int, Fd>, next_fd: c_int, is_initial: bool)
 where
-    Fd: Clone + Copy + std::fmt::Debug + Send + 'static + From<i32>,
+    Fd: Clone + Copy + std::fmt::Debug + Send + 'static + From<i32> + std::os::unix::io::AsRawFd,
 {
     if is_initial {
         // Initial wait for exec stop
@@ -214,7 +214,7 @@ where
 
 fn handle_syscall_entry<Fd>(pid: Pid, handler: &mut dyn Linux<Fd>, state: &mut ChildState<Fd>) -> Option<i64>
 where
-    Fd: Clone + Copy + std::fmt::Debug + From<i32>,
+    Fd: Clone + Copy + std::fmt::Debug + From<i32> + std::os::unix::io::AsRawFd,
 {
     let proc = crate::captured::CapturedProcess::new(pid);
     let regs = proc.get_regs().expect("Failed to get regs");
@@ -460,13 +460,24 @@ where
             let fds_addr = regs.rdi as usize;
             let nfds = regs.rsi as usize;
             let timeout = regs.rdx as i32;
-            let mut fds = read_pollfds(pid, fds_addr, nfds, state);
+            let (mut fds, guest_fds) = read_pollfds(pid, fds_addr, nfds, state);
+            
+            // Patch guest memory with Host FDs so the syscall works
+            write_fds_to_guest(pid, fds_addr, &fds);
+            
             match handler.poll(&proc, &mut fds, timeout) {
                 Ok(res) => {
-                    write_pollfds(pid, fds_addr, &fds);
+                    // Write back revents
+                    write_pollfds_revents(pid, fds_addr, &fds);
+                    // Restore original Guest FDs
+                    restore_guest_fds(pid, fds_addr, &guest_fds);
                     Some(res as i64)
                 },
-                Err(err) => Some(-(err as i32) as i64),
+                Err(err) => {
+                    // Restore original Guest FDs even on error
+                    restore_guest_fds(pid, fds_addr, &guest_fds);
+                    Some(-(err as i32) as i64)
+                },
             }
         }
         Some(Sysno::sendto) => {
@@ -580,46 +591,56 @@ fn write_bytes(pid: Pid, addr: usize, bytes: &[u8]) {
     }
 }
 
-fn read_pollfds<Fd>(pid: Pid, addr: usize, nfds: usize, state: &ChildState<Fd>) -> Vec<PollFd<Fd>>
+fn read_pollfds<Fd>(pid: Pid, addr: usize, nfds: usize, state: &ChildState<Fd>) -> (Vec<PollFd<Fd>>, Vec<i32>)
 where
     Fd: Clone + Copy + std::fmt::Debug + From<i32>,
 {
      let mut fds = Vec::with_capacity(nfds);
+     let mut guest_fds = Vec::with_capacity(nfds);
      let pollfd_size = std::mem::size_of::<libc::pollfd>();
      for i in 0..nfds {
          let item_addr = addr + i * pollfd_size;
          let word_addr = (item_addr & !7) as *mut libc::c_void;
          let offset = item_addr & 7;
          
+         let fd_int;
+         let events;
+         let revents;
+
          if offset == 0 {
              if let Ok(word) = ptrace::read(pid, word_addr) {
                  let bytes = word.to_ne_bytes();
-                 let fd_int = i32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
-                 let events = i16::from_ne_bytes([bytes[4], bytes[5]]);
-                 let revents = i16::from_ne_bytes([bytes[6], bytes[7]]);
-                 let fd = get_fd(state, fd_int);
-                 fds.push(PollFd { fd, events, revents });
-                 continue;
+                 fd_int = i32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+                 events = i16::from_ne_bytes([bytes[4], bytes[5]]);
+                 revents = i16::from_ne_bytes([bytes[6], bytes[7]]);
+             } else {
+                 fd_int = -1;
+                 events = 0;
+                 revents = 0;
+             }
+         } else {
+             // Fallback manual read... simplistic approach for now assuming alignment or simple read
+             // We reuse the read_memory logic implicit here or just read word
+             if let Ok(word) = ptrace::read(pid, item_addr as *mut libc::c_void) {
+                 let bytes = word.to_ne_bytes();
+                 fd_int = i32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+                 events = i16::from_ne_bytes([bytes[4], bytes[5]]);
+                 revents = i16::from_ne_bytes([bytes[6], bytes[7]]);
+             } else {
+                 fd_int = -1;
+                 events = 0;
+                 revents = 0;
              }
          }
          
-         // Fallback manual read
-         if let Ok(word) = ptrace::read(pid, item_addr as *mut libc::c_void) {
-             let bytes = word.to_ne_bytes();
-             let fd_int = i32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
-             let events = i16::from_ne_bytes([bytes[4], bytes[5]]);
-             let revents = i16::from_ne_bytes([bytes[6], bytes[7]]);
-             let fd = get_fd(state, fd_int);
-             fds.push(PollFd { fd, events, revents });
-         } else {
-             let fd = get_fd(state, -1);
-             fds.push(PollFd { fd, events: 0, revents: 0 });
-         }
+         guest_fds.push(fd_int);
+         let fd = get_fd(state, fd_int);
+         fds.push(PollFd { fd, events, revents });
      }
-     fds
+     (fds, guest_fds)
 }
 
-fn write_pollfds<Fd>(pid: Pid, addr: usize, fds: &[PollFd<Fd>]) {
+fn write_pollfds_revents<Fd>(pid: Pid, addr: usize, fds: &[PollFd<Fd>]) {
     let pollfd_size = std::mem::size_of::<libc::pollfd>();
     for (i, fd) in fds.iter().enumerate() {
         let item_addr = addr + i * pollfd_size;
@@ -627,5 +648,28 @@ fn write_pollfds<Fd>(pid: Pid, addr: usize, fds: &[PollFd<Fd>]) {
         let revents_addr = item_addr + 6;
         let revents_bytes = fd.revents.to_ne_bytes();
         write_bytes(pid, revents_addr, &revents_bytes);
+    }
+}
+
+fn write_fds_to_guest<Fd>(pid: Pid, addr: usize, fds: &[PollFd<Fd>]) 
+where Fd: std::os::unix::io::AsRawFd 
+{
+    let pollfd_size = std::mem::size_of::<libc::pollfd>();
+    for (i, pollfd) in fds.iter().enumerate() {
+        let item_addr = addr + i * pollfd_size;
+        // fd is at offset 0.
+        let fd_int = pollfd.fd.as_raw_fd();
+        let fd_bytes = fd_int.to_ne_bytes();
+        write_bytes(pid, item_addr, &fd_bytes);
+    }
+}
+
+fn restore_guest_fds(pid: Pid, addr: usize, guest_fds: &[i32]) {
+    let pollfd_size = std::mem::size_of::<libc::pollfd>();
+    for (i, &guest_fd) in guest_fds.iter().enumerate() {
+        let item_addr = addr + i * pollfd_size;
+        // fd is at offset 0.
+        let fd_bytes = guest_fd.to_ne_bytes();
+        write_bytes(pid, item_addr, &fd_bytes);
     }
 }
