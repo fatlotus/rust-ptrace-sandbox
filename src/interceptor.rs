@@ -7,6 +7,13 @@ use syscalls::Sysno;
 use crate::vdso;
 use std::collections::HashMap;
 use libc::c_int;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+static SHUTDOWN: AtomicBool = AtomicBool::new(false);
+
+extern "C" fn handle_sigterm(_: i32) {
+    SHUTDOWN.store(true, Ordering::Relaxed);
+}
 
 
 struct ChildState<Fd> {
@@ -24,6 +31,14 @@ where
 {
     match unsafe { fork() } {
         Ok(ForkResult::Parent { child }) => {
+            unsafe {
+                let sig_action = nix::sys::signal::SigAction::new(
+                    nix::sys::signal::SigHandler::Handler(handle_sigterm),
+                    nix::sys::signal::SaFlags::empty(),
+                    nix::sys::signal::SigSet::empty(),
+                );
+                let _ = nix::sys::signal::sigaction(nix::sys::signal::Signal::SIGTERM, &sig_action);
+            }
             parent_loop(child, Box::new(handler));
         }
         Ok(ForkResult::Child) => {
@@ -45,6 +60,13 @@ where
 fn wait_pid_with_timeout(pid: Pid) -> WaitStatus {
     let start = std::time::Instant::now();
     loop {
+        if SHUTDOWN.load(Ordering::Relaxed) {
+            // Kill and reap the child
+            let _ = nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGKILL);
+            let _ = waitpid(pid, None);
+             return WaitStatus::Signaled(pid, nix::sys::signal::Signal::SIGKILL, false);
+        }
+
         match waitpid(pid, Some(nix::sys::wait::WaitPidFlag::WNOHANG)).expect("Wait failed") {
             WaitStatus::StillAlive => {
                 if start.elapsed().as_secs() >= 5 {
