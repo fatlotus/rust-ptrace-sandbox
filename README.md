@@ -30,6 +30,7 @@ Features made deterministic in sandbox mode:
 - **Identity**: `getpid`, `getppid`, `getpgrp`, `getuid`, `geteuid`, `getgid`, `getegid`.
 - **Randomness**: `getrandom` returns a fixed byte pattern.
 - **File Metadata**: `fstat` and `newfstatat` zero out timestamps to remove file modification time entropy.
+- **Inter-Process Communication (IPC)**: Virtualizes networking (`socket`, `bind`, `connect`, `accept`, `listen`, `poll`) to allow simulated communication between sandboxed processes without exposing real network interfaces.
 - **System Info**: `uname` and `sysinfo`.
 - **ASLR**: Disables Address Space Layout Randomization (ASLR) in the child process using `personality(ADDR_NO_RANDOMIZE)`.
 
@@ -74,6 +75,7 @@ The following tests verify functionality:
 - `tests/date_test.rs`: Time interception (clock_gettime).
 - `tests/fork_test.rs`: Process creation interception (fork, vfork, clone).
 - `tests/networking.rs`: Networking interception (socket, bind, accept, connect).
+- `tests/networking_sandbox.rs`: Verification of networking virtualization in sandbox mode.
 - `tests/sqlite_test.rs`: SQLite3 support (lseek, unlink, pwrite64, fsync, fdatasync, getcwd).
 - `tests/deterministic_test.rs`: Verification of deterministic time and randomness in sandbox mode.
 
