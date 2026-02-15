@@ -36,7 +36,6 @@ Features made deterministic in sandbox mode:
 
 ```bash
 cargo run --bin=ptrace -- --sandbox /bin/bash -c 'echo $RANDOM'
-```
 cargo run --bin=ptrace -- --sandbox target/debug/random_gen
 ```
 
