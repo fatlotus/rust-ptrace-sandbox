@@ -74,6 +74,7 @@ pub struct Deterministic {
     passthru: Passthru,
     network: Arc<Network>,
     futexes: Arc<FutexManager>,
+    tid_address: Option<u64>,
 }
 
 impl Deterministic {
@@ -82,14 +83,16 @@ impl Deterministic {
             passthru: Passthru::new(verbose),
             network: Arc::new(Network::new()),
             futexes: Arc::new(FutexManager::new()),
+            tid_address: None,
         }
     }
 
-    pub fn with_state(verbose: bool, network: Arc<Network>, futexes: Arc<FutexManager>) -> Self {
+    pub fn with_tid(verbose: bool, network: Arc<Network>, futexes: Arc<FutexManager>, tid_address: Option<u64>) -> Self {
         Self {
             passthru: Passthru::new(verbose),
             network,
             futexes,
+            tid_address,
         }
     }
 
@@ -237,17 +240,17 @@ impl Linux<DeterministicFd> for Deterministic {
 
     fn fork(&mut self, proc: &CapturedProcess) -> nix::Result<(nix::unistd::Pid, Box<dyn Linux<DeterministicFd> + Send>)> {
         let (pid, _) = self.passthru.fork(proc)?;
-        Ok((pid, Box::new(Deterministic::with_state(self.passthru.verbose, self.network.clone(), self.futexes.clone()))))
+        Ok((pid, Box::new(Deterministic::with_tid(self.passthru.verbose, self.network.clone(), self.futexes.clone(), None))))
     }
 
     fn vfork(&mut self, proc: &CapturedProcess) -> nix::Result<(nix::unistd::Pid, Box<dyn Linux<DeterministicFd> + Send>)> {
         let (pid, _) = self.passthru.vfork(proc)?;
-        Ok((pid, Box::new(Deterministic::with_state(self.passthru.verbose, self.network.clone(), self.futexes.clone()))))
+        Ok((pid, Box::new(Deterministic::with_tid(self.passthru.verbose, self.network.clone(), self.futexes.clone(), None))))
     }
 
-    fn clone(&mut self, proc: &CapturedProcess, flags: c_int) -> nix::Result<(nix::unistd::Pid, Box<dyn Linux<DeterministicFd> + Send>)> {
-        let (pid, _) = self.passthru.clone(proc, flags)?;
-        Ok((pid, Box::new(Deterministic::with_state(self.passthru.verbose, self.network.clone(), self.futexes.clone()))))
+    fn clone(&mut self, proc: &CapturedProcess, flags: c_int, tid_address: Option<*mut c_int>) -> nix::Result<(nix::unistd::Pid, Box<dyn Linux<DeterministicFd> + Send>)> {
+        let (pid, _) = self.passthru.clone(proc, flags, tid_address)?;
+        Ok((pid, Box::new(Deterministic::with_tid(self.passthru.verbose, self.network.clone(), self.futexes.clone(), tid_address.map(|a| a as u64)))))
     }
 
     fn socket(&mut self, _proc: &CapturedProcess, domain: c_int, ty: c_int, protocol: c_int) -> nix::Result<DeterministicFd> {
@@ -708,10 +711,10 @@ impl Linux<DeterministicFd> for Deterministic {
     }
 
     fn futex(&mut self, proc: &CapturedProcess, uaddr: *mut u32, op: c_int, val: u32, timeout: *const libc::timespec, uaddr2: *mut u32, val3: u32) -> nix::Result<c_int> {
-        let futex_op = op & !libc::FUTEX_PRIVATE_FLAG;
-        if futex_op == libc::FUTEX_WAIT {
+        let futex_op = op & !(libc::FUTEX_PRIVATE_FLAG | libc::FUTEX_CLOCK_REALTIME);
+        if futex_op == libc::FUTEX_WAIT || futex_op == libc::FUTEX_WAIT_BITSET {
             if self.passthru.verbose {
-                println!("futex({:?}, FUTEX_WAIT, {}, ...) (VIRTUAL)", uaddr, val);
+                println!("futex({:?}, {}, {}, ...) (VIRTUAL)", uaddr, if futex_op == libc::FUTEX_WAIT { "FUTEX_WAIT" } else { "FUTEX_WAIT_BITSET" }, val);
             }
             
             // Read current value from guest memory
@@ -760,9 +763,9 @@ impl Linux<DeterministicFd> for Deterministic {
                     return Err(nix::Error::ESRCH);
                 }
             }
-        } else if futex_op == libc::FUTEX_WAKE {
+        } else if futex_op == libc::FUTEX_WAKE || futex_op == libc::FUTEX_WAKE_BITSET {
             if self.passthru.verbose {
-                println!("futex({:?}, FUTEX_WAKE, {}, ...) (VIRTUAL)", uaddr, val);
+                println!("futex({:?}, {}, {}, ...) (VIRTUAL)", uaddr, if futex_op == libc::FUTEX_WAKE { "FUTEX_WAKE" } else { "FUTEX_WAKE_BITSET" }, val);
             }
             self.skip_syscall(proc);
             
@@ -783,6 +786,22 @@ impl Linux<DeterministicFd> for Deterministic {
 
         // Fallback for other futex ops
         self.passthru.futex(proc, uaddr, op, val, timeout, uaddr2, val3)
+    }
+
+    fn set_tid_address(&mut self, proc: &CapturedProcess, tidptr: *mut c_int) -> nix::Result<c_int> {
+        self.tid_address = Some(tidptr as u64);
+        self.passthru.set_tid_address(proc, tidptr)
+    }
+
+    fn on_exit(&mut self, _proc: &CapturedProcess) {
+        if let Some(addr) = self.tid_address {
+            if self.passthru.verbose {
+                println!("on_exit: waking tid_address {:#x} (VIRTUAL)", addr);
+            }
+            let mut waiters = self.futexes.waiters.lock().unwrap();
+            waiters.remove(&addr);
+            self.futexes.condvar.notify_all();
+        }
     }
 
     fn is_verbose(&self) -> bool {
@@ -822,8 +841,17 @@ impl Deterministic {
                 self.skip_syscall(proc);
                 return r;
             }
-            // Wait for data
-            inner = self.network.condvar.wait(inner).unwrap();
+
+            if !proc.is_alive() {
+                return Err(nix::Error::ESRCH);
+            }
+
+            // Wait for data with timeout
+            let (new_inner, timeout_res) = self.network.condvar.wait_timeout(inner, std::time::Duration::from_millis(100)).unwrap();
+            inner = new_inner;
+            if timeout_res.timed_out() && !proc.is_alive() {
+                return Err(nix::Error::ESRCH);
+            }
         }
     }
 

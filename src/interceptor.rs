@@ -191,6 +191,8 @@ where
                             let _ = ptrace::setregs(pid, regs);
                             state.in_syscall = false;
                         } else {
+                            let proc = crate::captured::CapturedProcess::new(pid);
+                            handler.on_exit(&proc);
                             break;
                         }
                     } else {
@@ -246,10 +248,14 @@ where
             }
             WaitStatus::Exited(_, status) => {
                 println!("Child {} exited with status {}", pid, status);
+                let proc = crate::captured::CapturedProcess::new(pid);
+                handler.on_exit(&proc);
                 break;
             }
             WaitStatus::Signaled(_, sig, _) => {
                 println!("Child {} signaled with {}", pid, sig);
+                let proc = crate::captured::CapturedProcess::new(pid);
+                handler.on_exit(&proc);
                 break;
             }
             _other => {
@@ -414,7 +420,12 @@ where
         }
         Some(Sysno::clone) => {
             let flags = regs.rdi as i32;
-            match handler.clone(&proc, flags) {
+            let child_tid = if (flags & libc::CLONE_CHILD_SETTID) != 0 || (flags & libc::CLONE_CHILD_CLEARTID) != 0 {
+                Some(regs.r10 as *mut c_int)
+            } else {
+                None
+            };
+            match handler.clone(&proc, flags, child_tid) {
                 Ok((_, child_handler)) => {
                     state.pending_child_handler = Some(child_handler);
                     None
@@ -423,7 +434,24 @@ where
             }
         }
         Some(Sysno::clone3) => {
-            match handler.clone(&proc, 0) {
+            let addr = regs.rdi as usize;
+            let size = regs.rsi as usize;
+            let args_bytes = proc.read_memory(addr, std::cmp::min(size, 64)); // We only need the first few fields
+            
+            let mut flags = 0u64;
+            let mut child_tid = None;
+            
+            if args_bytes.len() >= 8 {
+                flags = u64::from_ne_bytes([args_bytes[0], args_bytes[1], args_bytes[2], args_bytes[3], args_bytes[4], args_bytes[5], args_bytes[6], args_bytes[7]]);
+            }
+            if args_bytes.len() >= 24 {
+                let tid_addr = u64::from_ne_bytes([args_bytes[16], args_bytes[17], args_bytes[18], args_bytes[19], args_bytes[20], args_bytes[21], args_bytes[22], args_bytes[23]]);
+                if (flags & libc::CLONE_CHILD_SETTID as u64) != 0 || (flags & libc::CLONE_CHILD_CLEARTID as u64) != 0 {
+                    child_tid = Some(tid_addr as *mut c_int);
+                }
+            }
+
+            match handler.clone(&proc, flags as i32, child_tid) {
                 Ok((_, child_handler)) => {
                     state.pending_child_handler = Some(child_handler);
                     None
@@ -795,6 +823,13 @@ where
             let uaddr2 = regs.r8 as *mut u32;
             let val3 = regs.r9 as u32;
             match handler.futex(&proc, uaddr, op, val, timeout, uaddr2, val3) {
+                Ok(res) => Some(res as i64),
+                Err(err) => Some(-(err as i32) as i64),
+            }
+        }
+        Some(Sysno::set_tid_address) => {
+            let tidptr = regs.rdi as *mut c_int;
+            match handler.set_tid_address(&proc, tidptr) {
                 Ok(res) => Some(res as i64),
                 Err(err) => Some(-(err as i32) as i64),
             }

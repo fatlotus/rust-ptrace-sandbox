@@ -164,7 +164,7 @@ impl Linux<PassthruFd> for Passthru {
         Ok((nix::unistd::Pid::from_raw(0), Box::new(Passthru::new(self.verbose))))
     }
 
-    fn clone(&mut self, _proc: &CapturedProcess, flags: i32) -> nix::Result<(nix::unistd::Pid, Box<dyn Linux<PassthruFd> + Send>)> {
+    fn clone(&mut self, _proc: &CapturedProcess, flags: i32, _tid_address: Option<*mut c_int>) -> nix::Result<(nix::unistd::Pid, Box<dyn Linux<PassthruFd> + Send>)> {
         if self.verbose {
             println!("clone(flags={}) = ?", flags);
         }
@@ -471,6 +471,18 @@ impl Linux<PassthruFd> for Passthru {
             println!("futex({:?}, {}, {}, {:?}, {:?}, {}) = {}", uaddr, op, val, timeout, uaddr2, val3, res);
         }
         Ok(res as c_int)
+    }
+
+    fn set_tid_address(&mut self, proc: &CapturedProcess, tidptr: *mut c_int) -> nix::Result<c_int> {
+        let res = proc.set_tid_address(tidptr as u64)?;
+        if self.verbose {
+            println!("set_tid_address({:?}) = {}", tidptr, res);
+        }
+        Ok(res as c_int)
+    }
+
+    fn on_exit(&mut self, _proc: &CapturedProcess) {
+        // Nothing to do for passthru
     }
 
     fn is_verbose(&self) -> bool {

@@ -87,7 +87,7 @@ pub trait Linux<Fd> {
     /// clone, __clone2, clone3 - create a child process
     ///
     /// These system calls create a new ("child") process, in a manner similar to fork(2).
-    fn clone(&mut self, proc: &CapturedProcess, flags: c_int) -> nix::Result<(nix::unistd::Pid, Box<dyn Linux<Fd> + Send>)>;
+    fn clone(&mut self, proc: &CapturedProcess, flags: c_int, tid_address: Option<*mut c_int>) -> nix::Result<(nix::unistd::Pid, Box<dyn Linux<Fd> + Send>)>;
 
     /// socket - create an endpoint for communication
     fn socket(&mut self, proc: &CapturedProcess, domain: c_int, ty: c_int, protocol: c_int) -> nix::Result<Fd>;
@@ -187,6 +187,12 @@ pub trait Linux<Fd> {
 
     /// futex - fast user-space locking
     fn futex(&mut self, proc: &CapturedProcess, uaddr: *mut u32, op: c_int, val: u32, timeout: *const libc::timespec, uaddr2: *mut u32, val3: u32) -> nix::Result<c_int>;
+
+    /// set_tid_address - set pointer to thread ID
+    fn set_tid_address(&mut self, proc: &CapturedProcess, tidptr: *mut c_int) -> nix::Result<c_int>;
+
+    /// on_exit - called when the tracee process/thread exits
+    fn on_exit(&mut self, proc: &CapturedProcess);
 
     /// is_verbose - check if verbose logging is enabled
     fn is_verbose(&self) -> bool;
