@@ -42,10 +42,30 @@ impl CapturedProcess {
         regs.r9 = arg6;
         self.set_regs(regs)?;
         
-        ptrace::syscall(self.pid, None)?;
-        let status = waitpid(self.pid, None)?;
-        if let nix::sys::wait::WaitStatus::Exited(_, _) | nix::sys::wait::WaitStatus::Signaled(_, _, _) = status {
-            return Ok(0);
+        loop {
+            ptrace::syscall(self.pid, None)?;
+            let status = waitpid(self.pid, None)?;
+            match status {
+                nix::sys::wait::WaitStatus::Exited(_, _) | nix::sys::wait::WaitStatus::Signaled(_, _, _) => {
+                    return Ok(0);
+                }
+                nix::sys::wait::WaitStatus::PtraceSyscall(_) => {
+                    // This is the syscall exit stop we expect
+                    break;
+                }
+                nix::sys::wait::WaitStatus::Stopped(_, sig) => {
+                    if sig == nix::sys::signal::Signal::SIGTRAP {
+                        // Probably another Ptrace event or just a trap, continue
+                        continue;
+                    }
+                    // If it's another signal, we need to pass it to the child and continue waiting for syscall exit
+                    ptrace::syscall(self.pid, Some(sig))?;
+                }
+                _ => {
+                    // Unexpected status, try to continue
+                    continue;
+                }
+            }
         }
         
         let result_regs = self.get_regs()?;
