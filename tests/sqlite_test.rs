@@ -1,9 +1,8 @@
 use std::process::Command;
 use std::fs;
 
-fn do_test_sqlite() {
+fn do_test_sqlite(db_file: &str) {
     let ptrace_bin = env!("CARGO_BIN_EXE_ptrace");
-    let db_file = "test.db";
     // Clean up previous run
     let _ = fs::remove_file(db_file);
     let _ = fs::remove_file(format!("{}-journal", db_file));
@@ -44,14 +43,14 @@ fn do_test_sqlite() {
 #[test]
 #[ntest::timeout(1000)]
 fn test_sqlite() {
-    do_test_sqlite();
+    do_test_sqlite("test.db");
 }
 
 #[test]
-#[ntest::timeout(1000)]
+#[ntest::timeout(10000)]
 #[cfg(feature = "stress")]
 fn stress_test_sqlite() {
-    for _ in 0..5 {
-        do_test_sqlite();
+    for i in 0..5 {
+        do_test_sqlite(&format!("test_stress_{}.db", i));
     }
 }
