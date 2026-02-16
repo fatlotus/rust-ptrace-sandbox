@@ -16,6 +16,16 @@ impl CapturedProcess {
     pub fn get_regs(&self) -> Result<libc::user_regs_struct> {
         ptrace::getregs(self.pid)
     }
+    
+    pub fn is_alive(&self) -> bool {
+        match waitpid(self.pid, Some(nix::sys::wait::WaitPidFlag::WNOHANG)) {
+            Ok(nix::sys::wait::WaitStatus::StillAlive) => true,
+            Ok(nix::sys::wait::WaitStatus::Stopped(_, _)) => true,
+            Ok(nix::sys::wait::WaitStatus::PtraceSyscall(_)) => true,
+            Ok(nix::sys::wait::WaitStatus::PtraceEvent(_, _, _)) => true,
+            _ => false,
+        }
+    }
 
     pub fn set_regs(&self, regs: libc::user_regs_struct) -> Result<()> {
         ptrace::setregs(self.pid, regs)

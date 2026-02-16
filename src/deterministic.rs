@@ -336,7 +336,16 @@ impl Linux<DeterministicFd> for Deterministic {
                         return Ok(DeterministicFd::Virtualized(client_idx));
                     }
 
-                    inner = self.network.condvar.wait(inner).unwrap();
+                    if !proc.is_alive() {
+                        return Err(nix::Error::ESRCH);
+                    }
+
+                    // Wait for data with timeout
+                    let (new_inner, timeout_res) = self.network.condvar.wait_timeout(inner, std::time::Duration::from_millis(100)).unwrap();
+                    inner = new_inner;
+                    if timeout_res.timed_out() && !proc.is_alive() {
+                        return Err(nix::Error::ESRCH);
+                    }
                 }
             }
         }
@@ -457,7 +466,7 @@ impl Linux<DeterministicFd> for Deterministic {
         self.skip_syscall(proc);
         loop {
             let mut ready_count = 0;
-            let inner = self.network.inner.lock().unwrap();
+            let mut inner = self.network.inner.lock().unwrap();
             for f in fds.iter_mut() {
                 f.revents = 0;
                 match f.fd {
@@ -486,8 +495,16 @@ impl Linux<DeterministicFd> for Deterministic {
                 return Ok(ready_count);
             }
 
-            // Wait for events
-            let _inner = self.network.condvar.wait(inner).unwrap();
+            if !proc.is_alive() {
+                return Err(nix::Error::ESRCH);
+            }
+
+            // Wait for events with timeout
+            let (new_inner, timeout_res) = self.network.condvar.wait_timeout(inner, std::time::Duration::from_millis(100)).unwrap();
+            inner = new_inner;
+            if timeout_res.timed_out() && !proc.is_alive() {
+                return Err(nix::Error::ESRCH);
+            }
         }
     }
 
