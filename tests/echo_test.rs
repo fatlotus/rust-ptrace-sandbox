@@ -1,7 +1,6 @@
 use std::process::Command;
 
-#[test]
-fn test_echo() {
+fn do_test_echo() {
     let ptrace_bin = env!("CARGO_BIN_EXE_ptrace");
     let output = Command::new(ptrace_bin)
         .arg("--verbose")
@@ -21,4 +20,19 @@ fn test_echo() {
     // Passthru should print write and brk syscalls
     assert!(stdout.contains("write(1,"));
     assert!(stdout.contains("brk("));
+}
+
+#[test]
+#[ntest::timeout(1000)]
+fn test_echo() {
+    do_test_echo();
+}
+
+#[test]
+#[ntest::timeout(1000)]
+#[cfg(feature = "stress")]
+fn stress_test_echo() {
+    for _ in 0..5 {
+        do_test_echo();
+    }
 }

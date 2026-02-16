@@ -1,7 +1,6 @@
 use std::process::Command;
 
-#[test]
-fn test_random_gen_deterministic() {
+fn do_test_random_gen_deterministic() {
     let ptrace_bin = env!("CARGO_BIN_EXE_ptrace");
     let random_gen_bin = env!("CARGO_BIN_EXE_random_gen");
 
@@ -30,11 +29,9 @@ fn test_random_gen_deterministic() {
     let line2 = stdout2.lines().find(|l| l.contains("Random bytes:")).unwrap();
     
     assert_eq!(line1, line2);
-    // Also verify it's not the same as a non-deterministic run (implicitly covered by test_random_gen_nondeterministic)
 }
 
-#[test]
-fn test_random_gen_nondeterministic() {
+fn do_test_random_gen_nondeterministic() {
     let ptrace_bin = env!("CARGO_BIN_EXE_ptrace");
     let random_gen_bin = env!("CARGO_BIN_EXE_random_gen");
 
@@ -58,4 +55,34 @@ fn test_random_gen_nondeterministic() {
     assert!(output2.status.success());
     // In passthru mode, they should (almost certainly) be different
     assert_ne!(stdout1, stdout2);
+}
+
+#[test]
+#[ntest::timeout(1000)]
+fn test_random_gen_deterministic() {
+    do_test_random_gen_deterministic();
+}
+
+#[test]
+#[ntest::timeout(1000)]
+#[cfg(feature = "stress")]
+fn stress_test_random_gen_deterministic() {
+    for _ in 0..5 {
+        do_test_random_gen_deterministic();
+    }
+}
+
+#[test]
+#[ntest::timeout(1000)]
+fn test_random_gen_nondeterministic() {
+    do_test_random_gen_nondeterministic();
+}
+
+#[test]
+#[ntest::timeout(1000)]
+#[cfg(feature = "stress")]
+fn stress_test_random_gen_nondeterministic() {
+    for _ in 0..5 {
+        do_test_random_gen_nondeterministic();
+    }
 }

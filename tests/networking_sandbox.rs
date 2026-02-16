@@ -1,7 +1,6 @@
 use std::process::Command;
 
-#[test]
-fn test_networking_sandbox() {
+fn do_test_networking_sandbox() {
     let ptrace_bin = env!("CARGO_BIN_EXE_ptrace");
     let networking_bin = env!("CARGO_BIN_EXE_networking_test");
 
@@ -27,4 +26,19 @@ fn test_networking_sandbox() {
     assert!(stdout.contains("bind("), "Missing bind syscall log");
     assert!(stdout.contains("connect("), "Missing connect syscall log");
     assert!(stdout.contains("accept("), "Missing accept syscall log");
+}
+
+#[test]
+#[ntest::timeout(2000)]
+fn test_networking_sandbox() {
+    do_test_networking_sandbox();
+}
+
+#[test]
+#[ntest::timeout(10000)]
+#[cfg(feature = "stress")]
+fn stress_test_networking_sandbox() {
+    for _ in 0..5 {
+        do_test_networking_sandbox();
+    }
 }

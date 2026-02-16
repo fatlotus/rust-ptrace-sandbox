@@ -1,7 +1,6 @@
 use std::process::Command;
 
-#[test]
-fn test_date() {
+fn do_test_date() {
     let ptrace_bin = env!("CARGO_BIN_EXE_ptrace");
     let output = Command::new(ptrace_bin)
         .arg("--verbose")
@@ -23,8 +22,7 @@ fn test_date() {
     assert!(stdout.contains("clock_gettime("));
 }
 
-#[test]
-fn test_date_sandbox() {
+fn do_test_date_sandbox() {
     let ptrace_bin = env!("CARGO_BIN_EXE_ptrace");
     let output = Command::new(ptrace_bin)
         .arg("--sandbox")
@@ -45,4 +43,34 @@ fn test_date_sandbox() {
     assert!(stdout.contains("Jan"));
     assert!(stdout.contains("1"));
     assert!(stdout.contains("00:00:00"));
+}
+
+#[test]
+#[ntest::timeout(1000)]
+fn test_date() {
+    do_test_date();
+}
+
+#[test]
+#[ntest::timeout(1000)]
+#[cfg(feature = "stress")]
+fn stress_test_date() {
+    for _ in 0..5 {
+        do_test_date();
+    }
+}
+
+#[test]
+#[ntest::timeout(1000)]
+fn test_date_sandbox() {
+    do_test_date_sandbox();
+}
+
+#[test]
+#[ntest::timeout(1000)]
+#[cfg(feature = "stress")]
+fn stress_test_date_sandbox() {
+    for _ in 0..5 {
+        do_test_date_sandbox();
+    }
 }

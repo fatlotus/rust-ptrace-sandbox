@@ -68,6 +68,18 @@ To run the integration tests:
 cargo test
 ```
 
+### Stress Testing
+
+A `stress` feature is available to run each test multiple times (default 100 iterations) to identify non-deterministic failures or race conditions.
+
+```bash
+cargo test --features stress
+```
+
+### Test Timeouts
+
+All tests are configured with a 1-second timeout using the `ntest` crate to ensure they complete within a reasonable timeframe and to catch potential deadlocks.
+
 The following tests verify functionality:
 - `tests/echo_test.rs`: Basic write/brk interception.
 - `tests/cat_test.rs`: File IO interception (openat, read, write, close).

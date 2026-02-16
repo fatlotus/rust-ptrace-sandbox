@@ -1,8 +1,7 @@
 use std::process::Command;
 use std::fs;
 
-#[test]
-fn test_sqlite() {
+fn do_test_sqlite() {
     let ptrace_bin = env!("CARGO_BIN_EXE_ptrace");
     let db_file = "test.db";
     // Clean up previous run
@@ -36,17 +35,21 @@ fn test_sqlite() {
     }
 
     assert!(stdout.contains("hello sqlite"));
-    
-    // Verify our new syscalls were traced (sqlite definitely uses lseek and maybe unlink/pwrite)
-    // Note: interceptor prints to stdout (or stderr depending on impl). passthru prints to stdout.
-    // The test captures both but checks stdout for content.
-    // ptrace might output to stderr or stdout. Passthru uses println!.
-    
-    // sqlite3 output "hello sqlite" should be in stdout.
-    // Passthru traces should be in stdout too mixed in? Or does sqlite write to non-stdout fd?
-    // sqlite prints to stdout. Passthru prints to stdout.
-    
-    // Let's check for "lseek" in stdout if we enabled it.
     assert!(stdout.contains("lseek("));
     assert!(stdout.contains("fcntl("));
+}
+
+#[test]
+#[ntest::timeout(1000)]
+fn test_sqlite() {
+    do_test_sqlite();
+}
+
+#[test]
+#[ntest::timeout(1000)]
+#[cfg(feature = "stress")]
+fn stress_test_sqlite() {
+    for _ in 0..5 {
+        do_test_sqlite();
+    }
 }
