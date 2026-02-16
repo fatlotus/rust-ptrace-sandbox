@@ -262,9 +262,13 @@ where
     match sysno {
         Some(Sysno::read) => {
             if let Some(fd) = get_fd_mut(state, regs.rdi as i32) {
+                let addr = regs.rsi as usize;
                 let count = regs.rdx as usize;
                 match handler.read(&proc, fd, count) {
-                    Ok(buf) => Some(buf.len() as i64),
+                    Ok(buf) => {
+                        write_bytes(pid, addr, &buf);
+                        Some(buf.len() as i64)
+                    }
                     Err(err) => Some(-(err as i32) as i64),
                 }
             } else {
