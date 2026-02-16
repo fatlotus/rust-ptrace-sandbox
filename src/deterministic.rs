@@ -53,9 +53,27 @@ impl Network {
     }
 }
 
+pub struct FutexManager {
+    // Maps guest address to a list of waiter IDs
+    waiters: Mutex<HashMap<u64, Vec<usize>>>,
+    condvar: Condvar,
+    next_waiter_id: Mutex<usize>,
+}
+
+impl FutexManager {
+    pub fn new() -> Self {
+        Self {
+            waiters: Mutex::new(HashMap::new()),
+            condvar: Condvar::new(),
+            next_waiter_id: Mutex::new(0),
+        }
+    }
+}
+
 pub struct Deterministic {
     passthru: Passthru,
     network: Arc<Network>,
+    futexes: Arc<FutexManager>,
 }
 
 impl Deterministic {
@@ -63,13 +81,15 @@ impl Deterministic {
         Self {
             passthru: Passthru::new(verbose),
             network: Arc::new(Network::new()),
+            futexes: Arc::new(FutexManager::new()),
         }
     }
 
-    pub fn with_network(verbose: bool, network: Arc<Network>) -> Self {
+    pub fn with_state(verbose: bool, network: Arc<Network>, futexes: Arc<FutexManager>) -> Self {
         Self {
             passthru: Passthru::new(verbose),
             network,
+            futexes,
         }
     }
 
@@ -217,17 +237,17 @@ impl Linux<DeterministicFd> for Deterministic {
 
     fn fork(&mut self, proc: &CapturedProcess) -> nix::Result<(nix::unistd::Pid, Box<dyn Linux<DeterministicFd> + Send>)> {
         let (pid, _) = self.passthru.fork(proc)?;
-        Ok((pid, Box::new(Deterministic::with_network(self.passthru.verbose, self.network.clone()))))
+        Ok((pid, Box::new(Deterministic::with_state(self.passthru.verbose, self.network.clone(), self.futexes.clone()))))
     }
 
     fn vfork(&mut self, proc: &CapturedProcess) -> nix::Result<(nix::unistd::Pid, Box<dyn Linux<DeterministicFd> + Send>)> {
         let (pid, _) = self.passthru.vfork(proc)?;
-        Ok((pid, Box::new(Deterministic::with_network(self.passthru.verbose, self.network.clone()))))
+        Ok((pid, Box::new(Deterministic::with_state(self.passthru.verbose, self.network.clone(), self.futexes.clone()))))
     }
 
     fn clone(&mut self, proc: &CapturedProcess, flags: c_int) -> nix::Result<(nix::unistd::Pid, Box<dyn Linux<DeterministicFd> + Send>)> {
         let (pid, _) = self.passthru.clone(proc, flags)?;
-        Ok((pid, Box::new(Deterministic::with_network(self.passthru.verbose, self.network.clone()))))
+        Ok((pid, Box::new(Deterministic::with_state(self.passthru.verbose, self.network.clone(), self.futexes.clone()))))
     }
 
     fn socket(&mut self, _proc: &CapturedProcess, domain: c_int, ty: c_int, protocol: c_int) -> nix::Result<DeterministicFd> {
@@ -688,6 +708,80 @@ impl Linux<DeterministicFd> for Deterministic {
     }
 
     fn futex(&mut self, proc: &CapturedProcess, uaddr: *mut u32, op: c_int, val: u32, timeout: *const libc::timespec, uaddr2: *mut u32, val3: u32) -> nix::Result<c_int> {
+        let futex_op = op & !libc::FUTEX_PRIVATE_FLAG;
+        if futex_op == libc::FUTEX_WAIT {
+            if self.passthru.verbose {
+                println!("futex({:?}, FUTEX_WAIT, {}, ...) (VIRTUAL)", uaddr, val);
+            }
+            
+            // Read current value from guest memory
+            let bytes = proc.read_memory(uaddr as usize, 4);
+            if bytes.len() < 4 { return Err(nix::Error::EFAULT); }
+            let current_val = u32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+            
+            if current_val != val {
+                self.skip_syscall(proc);
+                return Err(nix::Error::EAGAIN);
+            }
+
+            self.skip_syscall(proc);
+
+            let waiter_id;
+            {
+                let mut next_id = self.futexes.next_waiter_id.lock().unwrap();
+                waiter_id = *next_id;
+                *next_id += 1;
+            }
+
+            loop {
+                let mut waiters = self.futexes.waiters.lock().unwrap();
+                
+                // Add ourselves to the waiters list if not already there
+                let list = waiters.entry(uaddr as u64).or_insert_with(Vec::new);
+                if !list.contains(&waiter_id) {
+                    list.push(waiter_id);
+                }
+
+                if !proc.is_alive() {
+                    return Err(nix::Error::ESRCH);
+                }
+
+                // Wait for notification
+                let (new_waiters, _timeout_res) = self.futexes.condvar.wait_timeout(waiters, std::time::Duration::from_millis(100)).unwrap();
+                waiters = new_waiters;
+
+                // Check if we've been removed from the waiters list (meaning we were woken up)
+                let still_waiting = waiters.get(&(uaddr as u64)).map(|l| l.contains(&waiter_id)).unwrap_or(false);
+                if !still_waiting {
+                    return Ok(0);
+                }
+
+                if _timeout_res.timed_out() && !proc.is_alive() {
+                    return Err(nix::Error::ESRCH);
+                }
+            }
+        } else if futex_op == libc::FUTEX_WAKE {
+            if self.passthru.verbose {
+                println!("futex({:?}, FUTEX_WAKE, {}, ...) (VIRTUAL)", uaddr, val);
+            }
+            self.skip_syscall(proc);
+            
+            let mut waiters = self.futexes.waiters.lock().unwrap();
+            if let Some(list) = waiters.get_mut(&(uaddr as u64)) {
+                let to_wake = std::cmp::min(val as usize, list.len());
+                for _ in 0..to_wake {
+                    list.remove(0);
+                }
+                if list.is_empty() {
+                    waiters.remove(&(uaddr as u64));
+                }
+                self.futexes.condvar.notify_all();
+                return Ok(to_wake as i32);
+            }
+            return Ok(0);
+        }
+
+        // Fallback for other futex ops
         self.passthru.futex(proc, uaddr, op, val, timeout, uaddr2, val3)
     }
 

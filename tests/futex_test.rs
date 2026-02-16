@@ -46,3 +46,38 @@ fn test_futex_verbose() {
 fn test_futex_stress() {
     do_test_futex(env!("CARGO_BIN_EXE_futex_stress_test"), false);
 }
+
+#[test]
+#[ntest::timeout(10000)]
+fn test_futex_sandbox() {
+    let ptrace_bin = env!("CARGO_BIN_EXE_ptrace");
+    let test_bin = env!("CARGO_BIN_EXE_futex_test");
+    
+    let output = Command::new(ptrace_bin)
+        .arg("--sandbox")
+        .arg(test_bin)
+        .output()
+        .expect("Failed to execute ptrace bin");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success());
+    assert!(stdout.contains("Hello from thread!"));
+    assert!(stdout.contains("Thread joined!"));
+}
+
+#[test]
+#[ntest::timeout(10000)]
+fn test_futex_stress_sandbox() {
+    let ptrace_bin = env!("CARGO_BIN_EXE_ptrace");
+    let test_bin = env!("CARGO_BIN_EXE_futex_stress_test");
+    
+    let output = Command::new(ptrace_bin)
+        .arg("--sandbox")
+        .arg(test_bin)
+        .output()
+        .expect("Failed to execute ptrace bin");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success());
+    assert!(stdout.contains("Stress test finished!"));
+}
