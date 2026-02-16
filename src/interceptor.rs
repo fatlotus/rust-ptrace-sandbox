@@ -218,6 +218,10 @@ where
                     let new_pid = ptrace::getevent(pid).expect("Failed to get event msg");
                     let new_pid = Pid::from_raw(new_pid as i32);
                     
+                    // The new child is automatically traced by us. 
+                    // We must wait for it to stop before we can detach.
+                    let _ = waitpid(new_pid, None);
+
                     // Handover: detach from this thread so another can attach.
                     let _ = ptrace::detach(new_pid, Some(nix::sys::signal::Signal::SIGSTOP));
 

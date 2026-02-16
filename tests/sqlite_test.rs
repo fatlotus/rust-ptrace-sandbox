@@ -8,6 +8,7 @@ fn do_test_sqlite() {
     let _ = fs::remove_file(db_file);
     let _ = fs::remove_file(format!("{}-journal", db_file));
     let _ = fs::remove_file(format!("{}-wal", db_file));
+    let _ = fs::remove_file(format!("{}-shm", db_file));
 
     let sql_commands = "CREATE TABLE test (id INTEGER PRIMARY KEY, content TEXT); INSERT INTO test (content) VALUES ('hello sqlite'); SELECT content FROM test;";
 
@@ -29,6 +30,7 @@ fn do_test_sqlite() {
     let _ = fs::remove_file(db_file);
     let _ = fs::remove_file(format!("{}-journal", db_file));
     let _ = fs::remove_file(format!("{}-wal", db_file));
+    let _ = fs::remove_file(format!("{}-shm", db_file));
 
     if !output.status.success() {
          panic!("sqlite3 failed with status: {:?}\nSTDOUT:\n{}\nSTDERR:\n{}", output.status, stdout, stderr);
