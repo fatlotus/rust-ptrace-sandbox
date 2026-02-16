@@ -294,4 +294,8 @@ impl CapturedProcess {
     pub fn writev(&self, fd: c_int, iov: u64, iovcnt: c_int) -> Result<i64> {
         self.syscall(libc::SYS_writev as u64, fd as u64, iov, iovcnt as u64, 0, 0, 0)
     }
+
+    pub fn futex(&self, uaddr: u64, op: c_int, val: u32, timeout: u64, uaddr2: u64, val3: u32) -> Result<i64> {
+        self.syscall(libc::SYS_futex as u64, uaddr, op as u64, val as u64, timeout, uaddr2, val3 as u64)
+    }
 }

@@ -687,6 +687,10 @@ impl Linux<DeterministicFd> for Deterministic {
         }
     }
 
+    fn futex(&mut self, proc: &CapturedProcess, uaddr: *mut u32, op: c_int, val: u32, timeout: *const libc::timespec, uaddr2: *mut u32, val3: u32) -> nix::Result<c_int> {
+        self.passthru.futex(proc, uaddr, op, val, timeout, uaddr2, val3)
+    }
+
     fn is_verbose(&self) -> bool {
         self.passthru.verbose
     }

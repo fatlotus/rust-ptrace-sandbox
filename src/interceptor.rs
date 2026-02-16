@@ -787,6 +787,18 @@ where
                 Err(err) => Some(-(err as i32) as i64),
             }
         }
+        Some(Sysno::futex) => {
+            let uaddr = regs.rdi as *mut u32;
+            let op = regs.rsi as i32;
+            let val = regs.rdx as u32;
+            let timeout = regs.r10 as *const libc::timespec;
+            let uaddr2 = regs.r8 as *mut u32;
+            let val3 = regs.r9 as u32;
+            match handler.futex(&proc, uaddr, op, val, timeout, uaddr2, val3) {
+                Ok(res) => Some(res as i64),
+                Err(err) => Some(-(err as i32) as i64),
+            }
+        }
         Some(other_system_call) => {
             if handler.is_verbose() {
                 eprintln!("Child {} got an unknown system call: {}", pid, other_system_call);

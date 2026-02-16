@@ -185,6 +185,9 @@ pub trait Linux<Fd> {
     /// writev - write data from multiple buffers
     fn writev(&mut self, proc: &CapturedProcess, fd: &mut Fd, iov: u64, iovcnt: i32) -> nix::Result<usize>;
 
+    /// futex - fast user-space locking
+    fn futex(&mut self, proc: &CapturedProcess, uaddr: *mut u32, op: c_int, val: u32, timeout: *const libc::timespec, uaddr2: *mut u32, val3: u32) -> nix::Result<c_int>;
+
     /// is_verbose - check if verbose logging is enabled
     fn is_verbose(&self) -> bool;
 }

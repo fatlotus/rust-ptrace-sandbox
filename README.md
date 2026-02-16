@@ -87,6 +87,7 @@ The following tests verify functionality:
 - `tests/fork_test.rs`: Process creation interception (fork, vfork, clone).
 - `tests/networking.rs`: Networking interception (socket, bind, accept, connect).
 - `tests/networking_sandbox.rs`: Verification of networking virtualization in sandbox mode.
+- `tests/futex_test.rs`: Verification of futex system call (used by threads).
 - `tests/sqlite_test.rs`: SQLite3 support (lseek, unlink, pwrite64, fsync, fdatasync, getcwd).
 - `tests/deterministic_test.rs`: Verification of deterministic time and randomness in sandbox mode.
 

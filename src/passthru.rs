@@ -465,6 +465,14 @@ impl Linux<PassthruFd> for Passthru {
         Ok(res as usize)
     }
 
+    fn futex(&mut self, proc: &CapturedProcess, uaddr: *mut u32, op: c_int, val: u32, timeout: *const libc::timespec, uaddr2: *mut u32, val3: u32) -> nix::Result<c_int> {
+        let res = proc.futex(uaddr as u64, op, val, timeout as u64, uaddr2 as u64, val3)?;
+        if self.verbose {
+            println!("futex({:?}, {}, {}, {:?}, {:?}, {}) = {}", uaddr, op, val, timeout, uaddr2, val3, res);
+        }
+        Ok(res as c_int)
+    }
+
     fn is_verbose(&self) -> bool {
         self.verbose
     }
