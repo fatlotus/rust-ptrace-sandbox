@@ -116,13 +116,13 @@ where
         // Thread handover: the parent thread already called detach(SIGSTOP).
         // It might take a moment for the child to stop and be ready for attachment.
         let mut attached = false;
-        for _ in 0..100 {
+        for _ in 0..1000 {
             match ptrace::attach(pid) {
                 Ok(_) => {
                     attached = true;
                     break;
                 }
-                Err(nix::Error::ESRCH) => {
+                Err(nix::Error::ESRCH) | Err(nix::Error::EPERM) => {
                     std::thread::sleep(std::time::Duration::from_millis(1));
                 }
                 Err(e) => {
@@ -139,10 +139,16 @@ where
         loop {
             match waitpid(pid, None) {
                 Ok(WaitStatus::Stopped(_, nix::sys::signal::Signal::SIGSTOP)) => break,
+                Ok(WaitStatus::PtraceSyscall(_)) | Ok(WaitStatus::PtraceEvent(_, _, _)) => {
+                    // If we get other ptrace stops, just keep going until we get the SIGSTOP
+                    let _ = ptrace::syscall(pid, None);
+                }
                 Ok(status) => {
                     if let WaitStatus::Exited(_, _) | WaitStatus::Signaled(_, _, _) = status {
                         return;
                     }
+                    // For other signals, we might need to pass them through if we were the tracer,
+                    // but here we are still trying to become the tracer.
                     let _ = ptrace::syscall(pid, None);
                 }
                 Err(_) => return,
