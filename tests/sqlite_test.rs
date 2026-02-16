@@ -43,14 +43,18 @@ fn do_test_sqlite(db_file: &str) {
 #[test]
 #[ntest::timeout(1000)]
 fn test_sqlite() {
-    do_test_sqlite("test.db");
+    let thread_id = format!("{:?}", std::thread::current().id());
+    let thread_id = thread_id.replace("ThreadId(", "").replace(")", "");
+    do_test_sqlite(&format!("test_{}.db", thread_id));
 }
 
 #[test]
 #[ntest::timeout(10000)]
 #[cfg(feature = "stress")]
 fn stress_test_sqlite() {
+    let thread_id = format!("{:?}", std::thread::current().id());
+    let thread_id = thread_id.replace("ThreadId(", "").replace(")", "");
     for i in 0..5 {
-        do_test_sqlite(&format!("test_stress_{}.db", i));
+        do_test_sqlite(&format!("test_stress_{}_{}.db", thread_id, i));
     }
 }

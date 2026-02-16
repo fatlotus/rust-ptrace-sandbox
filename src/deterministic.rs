@@ -717,18 +717,6 @@ impl Linux<DeterministicFd> for Deterministic {
                 println!("futex({:?}, {}, {}, ...) (VIRTUAL)", uaddr, if futex_op == libc::FUTEX_WAIT { "FUTEX_WAIT" } else { "FUTEX_WAIT_BITSET" }, val);
             }
             
-            // Read current value from guest memory
-            let bytes = proc.read_memory(uaddr as usize, 4);
-            if bytes.len() < 4 { return Err(nix::Error::EFAULT); }
-            let current_val = u32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
-            
-            if current_val != val {
-                self.skip_syscall(proc);
-                return Err(nix::Error::EAGAIN);
-            }
-
-            self.skip_syscall(proc);
-
             let waiter_id;
             {
                 let mut next_id = self.futexes.next_waiter_id.lock().unwrap();
@@ -736,13 +724,42 @@ impl Linux<DeterministicFd> for Deterministic {
                 *next_id += 1;
             }
 
+            // Add to waiters BEFORE checking the value to avoid races with WAKE
+            {
+                let mut waiters = self.futexes.waiters.lock().unwrap();
+                let list = waiters.entry(uaddr as u64).or_insert_with(Vec::new);
+                list.push(waiter_id);
+            }
+
+            // Read current value from guest memory
+            let bytes = proc.read_memory(uaddr as usize, 4);
+            if bytes.len() < 4 {
+                let mut waiters = self.futexes.waiters.lock().unwrap();
+                if let Some(list) = waiters.get_mut(&(uaddr as u64)) {
+                    list.retain(|&id| id != waiter_id);
+                }
+                return Err(nix::Error::EFAULT);
+            }
+            let current_val = u32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+            
+            if current_val != val {
+                let mut waiters = self.futexes.waiters.lock().unwrap();
+                if let Some(list) = waiters.get_mut(&(uaddr as u64)) {
+                    list.retain(|&id| id != waiter_id);
+                }
+                self.skip_syscall(proc);
+                return Err(nix::Error::EAGAIN);
+            }
+
+            self.skip_syscall(proc);
+
             loop {
                 let mut waiters = self.futexes.waiters.lock().unwrap();
                 
-                // Add ourselves to the waiters list if not already there
-                let list = waiters.entry(uaddr as u64).or_insert_with(Vec::new);
-                if !list.contains(&waiter_id) {
-                    list.push(waiter_id);
+                // Check if we've been removed from the waiters list (meaning we were woken up)
+                let still_waiting = waiters.get(&(uaddr as u64)).map(|l| l.contains(&waiter_id)).unwrap_or(false);
+                if !still_waiting {
+                    return Ok(0);
                 }
 
                 if !proc.is_alive() {
@@ -752,12 +769,6 @@ impl Linux<DeterministicFd> for Deterministic {
                 // Wait for notification
                 let (new_waiters, _timeout_res) = self.futexes.condvar.wait_timeout(waiters, std::time::Duration::from_millis(100)).unwrap();
                 waiters = new_waiters;
-
-                // Check if we've been removed from the waiters list (meaning we were woken up)
-                let still_waiting = waiters.get(&(uaddr as u64)).map(|l| l.contains(&waiter_id)).unwrap_or(false);
-                if !still_waiting {
-                    return Ok(0);
-                }
 
                 if _timeout_res.timed_out() && !proc.is_alive() {
                     return Err(nix::Error::ESRCH);

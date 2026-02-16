@@ -31,7 +31,7 @@ Features made deterministic in sandbox mode:
 - **Randomness**: `getrandom` returns a fixed byte pattern.
 - **File Metadata**: `fstat` and `newfstatat` zero out timestamps to remove file modification time entropy.
 - **Inter-Process Communication (IPC)**: Virtualizes networking (`socket`, `bind`, `connect`, `accept`, `listen`, `poll`) to allow simulated communication between sandboxed processes without exposing real network interfaces.
-- **Synchronization**: Virtualizes `futex` (`FUTEX_WAIT`, `FUTEX_WAKE`) to provide deterministic thread synchronization.
+- **Synchronization**: Virtualizes `futex` (`FUTEX_WAIT`, `FUTEX_WAKE`, `FUTEX_WAIT_BITSET`, `FUTEX_WAKE_BITSET`) to provide deterministic thread synchronization. It handles thread lifecycle by tracking TID addresses via `clone`, `clone3`, and `set_tid_address`.
 - **System Info**: `uname` and `sysinfo`.
 - **ASLR**: Disables Address Space Layout Randomization (ASLR) in the child process using `personality(ADDR_NO_RANDOMIZE)`.
 
