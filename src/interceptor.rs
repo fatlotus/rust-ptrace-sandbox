@@ -848,6 +848,24 @@ where
                 Err(err) => Some(-(err as i32) as i64),
             }
         }
+        Some(Sysno::nanosleep) => {
+            let req = regs.rdi as *const libc::timespec;
+            let rem = regs.rsi as *mut libc::timespec;
+            match handler.nanosleep(&proc, req, rem) {
+                Ok(res) => Some(res as i64),
+                Err(err) => Some(-(err as i32) as i64),
+            }
+        }
+        Some(Sysno::clock_nanosleep) => {
+            let clk_id = regs.rdi as libc::clockid_t;
+            let flags = regs.rsi as c_int;
+            let req = regs.rdx as *const libc::timespec;
+            let rem = regs.r10 as *mut libc::timespec;
+            match handler.clock_nanosleep(&proc, clk_id, flags, req, rem) {
+                Ok(res) => Some(res as i64),
+                Err(err) => Some(-(err as i32) as i64),
+            }
+        }
         Some(other_system_call) => {
             if handler.is_verbose() {
                 eprintln!("Child {} got an unknown system call: {}", pid, other_system_call);

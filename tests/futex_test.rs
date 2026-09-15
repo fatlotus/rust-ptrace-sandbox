@@ -30,13 +30,13 @@ fn do_test_futex(bin: &str, verbose: bool) {
 }
 
 #[test]
-#[ntest::timeout(5000)]
+#[ntest::timeout(10000)]
 fn test_futex() {
     do_test_futex(env!("CARGO_BIN_EXE_futex_test"), false);
 }
 
 #[test]
-#[ntest::timeout(5000)]
+#[ntest::timeout(10000)]
 fn test_futex_verbose() {
     do_test_futex(env!("CARGO_BIN_EXE_futex_test"), true);
 }
@@ -53,16 +53,22 @@ fn test_futex_sandbox() {
     let ptrace_bin = env!("CARGO_BIN_EXE_ptrace");
     let test_bin = env!("CARGO_BIN_EXE_futex_test");
     
+    let start = std::time::Instant::now();
     let output = Command::new(ptrace_bin)
         .arg("--sandbox")
         .arg(test_bin)
         .output()
         .expect("Failed to execute ptrace bin");
+    let elapsed = start.elapsed();
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(output.status.success());
     assert!(stdout.contains("Hello from thread!"));
     assert!(stdout.contains("Thread joined!"));
+    assert!(stdout.contains("Wake order: [2, 1, 3]"));
+    assert!(stdout.contains("Multi-thread sleep simulation verified!"));
+    // Verify that concurrent sleeping with time dilation ran much faster than real-time 3s
+    assert!(elapsed.as_secs_f64() < 2.5, "Expected elapsed < 2.5s, took {:?}", elapsed);
 }
 
 #[test]

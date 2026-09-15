@@ -194,6 +194,12 @@ pub trait Linux<Fd> {
     /// on_exit - called when the tracee process/thread exits
     fn on_exit(&mut self, proc: &CapturedProcess);
 
+    /// nanosleep - high-resolution sleep
+    fn nanosleep(&mut self, proc: &CapturedProcess, req: *const libc::timespec, rem: *mut libc::timespec) -> nix::Result<c_int>;
+
+    /// clock_nanosleep - high-resolution sleep with a specified clock
+    fn clock_nanosleep(&mut self, proc: &CapturedProcess, clk_id: libc::clockid_t, flags: c_int, req: *const libc::timespec, rem: *mut libc::timespec) -> nix::Result<c_int>;
+
     /// is_verbose - check if verbose logging is enabled
     fn is_verbose(&self) -> bool;
 }

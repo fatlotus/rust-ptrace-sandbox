@@ -485,6 +485,22 @@ impl Linux<PassthruFd> for Passthru {
         // Nothing to do for passthru
     }
 
+    fn nanosleep(&mut self, proc: &CapturedProcess, req: *const libc::timespec, rem: *mut libc::timespec) -> nix::Result<c_int> {
+        let res = proc.syscall(libc::SYS_nanosleep as u64, req as u64, rem as u64, 0, 0, 0, 0)?;
+        if self.verbose {
+            println!("nanosleep({:?}, {:?}) = {}", req, rem, res);
+        }
+        Ok(res as c_int)
+    }
+
+    fn clock_nanosleep(&mut self, proc: &CapturedProcess, clk_id: libc::clockid_t, flags: c_int, req: *const libc::timespec, rem: *mut libc::timespec) -> nix::Result<c_int> {
+        let res = proc.syscall(libc::SYS_clock_nanosleep as u64, clk_id as u64, flags as u64, req as u64, rem as u64, 0, 0)?;
+        if self.verbose {
+            println!("clock_nanosleep({}, {}, {:?}, {:?}) = {}", clk_id, flags, req, rem, res);
+        }
+        Ok(res as c_int)
+    }
+
     fn is_verbose(&self) -> bool {
         self.verbose
     }

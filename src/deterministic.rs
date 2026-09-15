@@ -3,8 +3,10 @@ use crate::captured::CapturedProcess;
 use crate::passthru::{Passthru, PassthruFd};
 use libc::{c_int, c_void, mode_t, off_t};
 use std::sync::{Arc, Mutex, Condvar};
-use std::collections::HashMap;
+use std::collections::{BinaryHeap, HashMap};
 use std::net::SocketAddr;
+use std::time::Duration;
+use std::cmp::Ordering;
 
 pub enum DeterministicFd {
     Passthru(PassthruFd),
@@ -53,27 +55,332 @@ impl Network {
     }
 }
 
-pub struct FutexManager {
-    // Maps guest address to a list of waiter IDs
-    waiters: Mutex<HashMap<u64, Vec<usize>>>,
-    condvar: Condvar,
-    next_waiter_id: Mutex<usize>,
+#[derive(Debug, PartialEq, Eq)]
+struct TimerEvent {
+    target_time: Duration,
+    waiter_id: usize,
 }
 
-impl FutexManager {
+impl Ord for TimerEvent {
+    fn cmp(&self, other: &Self) -> Ordering {
+        // Min-heap: smaller target_time has higher priority
+        other.target_time.cmp(&self.target_time)
+            .then_with(|| other.waiter_id.cmp(&self.waiter_id))
+    }
+}
+
+impl PartialOrd for TimerEvent {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WaiterStatus {
+    Waiting,
+    TimerExpired,
+    Woken,
+}
+
+struct TimeInner {
+    current_time: Duration,
+    active_threads: usize,
+    blocked_threads: usize,
+    next_waiter_id: usize,
+    timers: BinaryHeap<TimerEvent>,
+    waiters: HashMap<usize, WaiterStatus>,
+    futex_waiters: HashMap<u64, Vec<usize>>,
+}
+
+pub struct TimeManager {
+    inner: Mutex<TimeInner>,
+    condvar: Condvar,
+}
+
+impl TimeManager {
     pub fn new() -> Self {
         Self {
-            waiters: Mutex::new(HashMap::new()),
+            inner: Mutex::new(TimeInner {
+                current_time: Duration::from_secs(946684800), // 2000-01-01 00:00:00 UTC
+                active_threads: 1,
+                blocked_threads: 0,
+                next_waiter_id: 0,
+                timers: BinaryHeap::new(),
+                waiters: HashMap::new(),
+                futex_waiters: HashMap::new(),
+            }),
             condvar: Condvar::new(),
-            next_waiter_id: Mutex::new(0),
         }
+    }
+
+    fn maybe_advance_clock_locked(inner: &mut TimeInner, condvar: &Condvar) {
+        if inner.blocked_threads >= inner.active_threads && !inner.timers.is_empty() {
+            if let Some(earliest) = inner.timers.peek() {
+                let target = earliest.target_time;
+                if target > inner.current_time {
+                    inner.current_time = target;
+                }
+            }
+            while let Some(earliest) = inner.timers.peek() {
+                if earliest.target_time <= inner.current_time {
+                    let timer = inner.timers.pop().unwrap();
+                    if let Some(status) = inner.waiters.get_mut(&timer.waiter_id) {
+                        if *status == WaiterStatus::Waiting {
+                            *status = WaiterStatus::TimerExpired;
+                            if inner.blocked_threads > 0 {
+                                inner.blocked_threads -= 1;
+                            }
+                        }
+                    }
+                } else {
+                    break;
+                }
+            }
+            condvar.notify_all();
+        }
+    }
+
+    pub fn get_time(&self) -> Duration {
+        let inner = self.inner.lock().unwrap();
+        inner.current_time
+    }
+
+    pub fn register_thread(&self) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.active_threads += 1;
+    }
+
+    pub fn sleep(&self, proc: &CapturedProcess, dur: Duration) -> nix::Result<()> {
+        let mut inner = self.inner.lock().unwrap();
+        let waiter_id = inner.next_waiter_id;
+        inner.next_waiter_id += 1;
+
+        let target_time = inner.current_time + dur;
+        inner.timers.push(TimerEvent {
+            target_time,
+            waiter_id,
+        });
+        inner.waiters.insert(waiter_id, WaiterStatus::Waiting);
+        inner.blocked_threads += 1;
+
+        Self::maybe_advance_clock_locked(&mut inner, &self.condvar);
+
+        while inner.waiters.get(&waiter_id) == Some(&WaiterStatus::Waiting) {
+            if !proc.is_alive() {
+                inner.waiters.remove(&waiter_id);
+                if inner.blocked_threads > 0 {
+                    inner.blocked_threads -= 1;
+                }
+                return Err(nix::Error::ESRCH);
+            }
+
+            let (new_inner, timeout_res) = self.condvar.wait_timeout(inner, Duration::from_millis(50)).unwrap();
+            inner = new_inner;
+
+            if timeout_res.timed_out() {
+                if !proc.is_alive() {
+                    inner.waiters.remove(&waiter_id);
+                    if inner.blocked_threads > 0 {
+                        inner.blocked_threads -= 1;
+                    }
+                    return Err(nix::Error::ESRCH);
+                }
+                Self::maybe_advance_clock_locked(&mut inner, &self.condvar);
+            }
+        }
+
+        inner.waiters.remove(&waiter_id);
+        Ok(())
+    }
+
+    pub fn sleep_until(&self, proc: &CapturedProcess, target_time: Duration) -> nix::Result<()> {
+        let mut inner = self.inner.lock().unwrap();
+        if target_time <= inner.current_time {
+            return Ok(());
+        }
+
+        let waiter_id = inner.next_waiter_id;
+        inner.next_waiter_id += 1;
+
+        inner.timers.push(TimerEvent {
+            target_time,
+            waiter_id,
+        });
+        inner.waiters.insert(waiter_id, WaiterStatus::Waiting);
+        inner.blocked_threads += 1;
+
+        Self::maybe_advance_clock_locked(&mut inner, &self.condvar);
+
+        while inner.waiters.get(&waiter_id) == Some(&WaiterStatus::Waiting) {
+            if !proc.is_alive() {
+                inner.waiters.remove(&waiter_id);
+                if inner.blocked_threads > 0 {
+                    inner.blocked_threads -= 1;
+                }
+                return Err(nix::Error::ESRCH);
+            }
+
+            let (new_inner, timeout_res) = self.condvar.wait_timeout(inner, Duration::from_millis(50)).unwrap();
+            inner = new_inner;
+
+            if timeout_res.timed_out() {
+                if !proc.is_alive() {
+                    inner.waiters.remove(&waiter_id);
+                    if inner.blocked_threads > 0 {
+                        inner.blocked_threads -= 1;
+                    }
+                    return Err(nix::Error::ESRCH);
+                }
+                Self::maybe_advance_clock_locked(&mut inner, &self.condvar);
+            }
+        }
+
+        inner.waiters.remove(&waiter_id);
+        Ok(())
+    }
+
+    fn cleanup_waiter(&self, inner: &mut TimeInner, uaddr: u64, waiter_id: usize) {
+        if let Some(list) = inner.futex_waiters.get_mut(&uaddr) {
+            list.retain(|&id| id != waiter_id);
+            if list.is_empty() {
+                inner.futex_waiters.remove(&uaddr);
+            }
+        }
+        if let Some(status) = inner.waiters.remove(&waiter_id) {
+            if status == WaiterStatus::Waiting && inner.blocked_threads > 0 {
+                inner.blocked_threads -= 1;
+            }
+        }
+    }
+
+    pub fn futex_wait(
+        &self,
+        proc: &CapturedProcess,
+        uaddr: u64,
+        val: u32,
+        timeout: Option<Duration>,
+    ) -> nix::Result<c_int> {
+        let waiter_id;
+        {
+            let mut inner = self.inner.lock().unwrap();
+            waiter_id = inner.next_waiter_id;
+            inner.next_waiter_id += 1;
+            inner.futex_waiters.entry(uaddr).or_default().push(waiter_id);
+            inner.waiters.insert(waiter_id, WaiterStatus::Waiting);
+            inner.blocked_threads += 1;
+
+            if let Some(dur) = timeout {
+                let target_time = inner.current_time + dur;
+                inner.timers.push(TimerEvent {
+                    target_time,
+                    waiter_id,
+                });
+            }
+
+            Self::maybe_advance_clock_locked(&mut inner, &self.condvar);
+        }
+
+        // Read current value from guest memory to check if value matches
+        let bytes = proc.read_memory(uaddr as usize, 4);
+        if bytes.len() < 4 {
+            let mut inner = self.inner.lock().unwrap();
+            self.cleanup_waiter(&mut inner, uaddr, waiter_id);
+            return Err(nix::Error::EFAULT);
+        }
+        let current_val = u32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+        if current_val != val {
+            let mut inner = self.inner.lock().unwrap();
+            self.cleanup_waiter(&mut inner, uaddr, waiter_id);
+            return Err(nix::Error::EAGAIN);
+        }
+
+        let mut inner = self.inner.lock().unwrap();
+        while inner.waiters.get(&waiter_id) == Some(&WaiterStatus::Waiting) {
+            if !proc.is_alive() {
+                self.cleanup_waiter(&mut inner, uaddr, waiter_id);
+                return Err(nix::Error::ESRCH);
+            }
+
+            let (new_inner, timeout_res) = self.condvar.wait_timeout(inner, Duration::from_millis(50)).unwrap();
+            inner = new_inner;
+
+            if timeout_res.timed_out() {
+                if !proc.is_alive() {
+                    self.cleanup_waiter(&mut inner, uaddr, waiter_id);
+                    return Err(nix::Error::ESRCH);
+                }
+                Self::maybe_advance_clock_locked(&mut inner, &self.condvar);
+            }
+        }
+
+        let final_status = inner.waiters.remove(&waiter_id);
+        if let Some(list) = inner.futex_waiters.get_mut(&uaddr) {
+            list.retain(|&id| id != waiter_id);
+            if list.is_empty() {
+                inner.futex_waiters.remove(&uaddr);
+            }
+        }
+
+        match final_status {
+            Some(WaiterStatus::Woken) => Ok(0),
+            Some(WaiterStatus::TimerExpired) => Err(nix::Error::ETIMEDOUT),
+            _ => Ok(0),
+        }
+    }
+
+    pub fn futex_wake(&self, uaddr: u64, val: u32) -> nix::Result<c_int> {
+        let mut inner = self.inner.lock().unwrap();
+        if let Some(list) = inner.futex_waiters.get_mut(&uaddr) {
+            let to_wake = std::cmp::min(val as usize, list.len());
+            let woken_ids: Vec<usize> = list.drain(0..to_wake).collect();
+            if list.is_empty() {
+                inner.futex_waiters.remove(&uaddr);
+            }
+            for id in woken_ids {
+                if let Some(status) = inner.waiters.get_mut(&id) {
+                    if *status == WaiterStatus::Waiting {
+                        *status = WaiterStatus::Woken;
+                        if inner.blocked_threads > 0 {
+                            inner.blocked_threads -= 1;
+                        }
+                    }
+                }
+            }
+            self.condvar.notify_all();
+            Ok(to_wake as i32)
+        } else {
+            Ok(0)
+        }
+    }
+
+    pub fn on_exit(&self, tid_address: Option<u64>) {
+        let mut inner = self.inner.lock().unwrap();
+        if let Some(addr) = tid_address {
+            if let Some(list) = inner.futex_waiters.remove(&addr) {
+                for id in list {
+                    if let Some(status) = inner.waiters.get_mut(&id) {
+                        if *status == WaiterStatus::Waiting {
+                            *status = WaiterStatus::Woken;
+                            if inner.blocked_threads > 0 {
+                                inner.blocked_threads -= 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if inner.active_threads > 0 {
+            inner.active_threads -= 1;
+        }
+        Self::maybe_advance_clock_locked(&mut inner, &self.condvar);
+        self.condvar.notify_all();
     }
 }
 
 pub struct Deterministic {
     passthru: Passthru,
     network: Arc<Network>,
-    futexes: Arc<FutexManager>,
+    time_manager: Arc<TimeManager>,
     tid_address: Option<u64>,
 }
 
@@ -82,16 +389,16 @@ impl Deterministic {
         Self {
             passthru: Passthru::new(verbose),
             network: Arc::new(Network::new()),
-            futexes: Arc::new(FutexManager::new()),
+            time_manager: Arc::new(TimeManager::new()),
             tid_address: None,
         }
     }
 
-    pub fn with_tid(verbose: bool, network: Arc<Network>, futexes: Arc<FutexManager>, tid_address: Option<u64>) -> Self {
+    pub fn with_tid(verbose: bool, network: Arc<Network>, time_manager: Arc<TimeManager>, tid_address: Option<u64>) -> Self {
         Self {
             passthru: Passthru::new(verbose),
             network,
-            futexes,
+            time_manager,
             tid_address,
         }
     }
@@ -221,10 +528,9 @@ impl Linux<DeterministicFd> for Deterministic {
         let regs = proc.get_regs()?;
         let tp_addr = regs.rsi as usize;
         
-        // Return a fixed timestamp: 2000-01-01 00:00:00 UTC
-        // Unix timestamp for 2000-01-01 00:00:00 is 946684800
-        let tv_sec: i64 = 946684800;
-        let tv_nsec: i64 = 0;
+        let current_time = self.time_manager.get_time();
+        let tv_sec: i64 = current_time.as_secs() as i64;
+        let tv_nsec: i64 = current_time.subsec_nanos() as i64;
         
         let mut bytes = Vec::with_capacity(16);
         bytes.extend_from_slice(&tv_sec.to_ne_bytes());
@@ -240,17 +546,20 @@ impl Linux<DeterministicFd> for Deterministic {
 
     fn fork(&mut self, proc: &CapturedProcess) -> nix::Result<(nix::unistd::Pid, Box<dyn Linux<DeterministicFd> + Send>)> {
         let (pid, _) = self.passthru.fork(proc)?;
-        Ok((pid, Box::new(Deterministic::with_tid(self.passthru.verbose, self.network.clone(), self.futexes.clone(), None))))
+        self.time_manager.register_thread();
+        Ok((pid, Box::new(Deterministic::with_tid(self.passthru.verbose, self.network.clone(), self.time_manager.clone(), None))))
     }
 
     fn vfork(&mut self, proc: &CapturedProcess) -> nix::Result<(nix::unistd::Pid, Box<dyn Linux<DeterministicFd> + Send>)> {
         let (pid, _) = self.passthru.vfork(proc)?;
-        Ok((pid, Box::new(Deterministic::with_tid(self.passthru.verbose, self.network.clone(), self.futexes.clone(), None))))
+        self.time_manager.register_thread();
+        Ok((pid, Box::new(Deterministic::with_tid(self.passthru.verbose, self.network.clone(), self.time_manager.clone(), None))))
     }
 
     fn clone(&mut self, proc: &CapturedProcess, flags: c_int, tid_address: Option<*mut c_int>) -> nix::Result<(nix::unistd::Pid, Box<dyn Linux<DeterministicFd> + Send>)> {
         let (pid, _) = self.passthru.clone(proc, flags, tid_address)?;
-        Ok((pid, Box::new(Deterministic::with_tid(self.passthru.verbose, self.network.clone(), self.futexes.clone(), tid_address.map(|a| a as u64)))))
+        self.time_manager.register_thread();
+        Ok((pid, Box::new(Deterministic::with_tid(self.passthru.verbose, self.network.clone(), self.time_manager.clone(), tid_address.map(|a| a as u64)))))
     }
 
     fn socket(&mut self, _proc: &CapturedProcess, domain: c_int, ty: c_int, protocol: c_int) -> nix::Result<DeterministicFd> {
@@ -630,9 +939,9 @@ impl Linux<DeterministicFd> for Deterministic {
         let regs = proc.get_regs()?;
         let tv_addr = regs.rdi as usize;
         
-        // Return a fixed timestamp: 2000-01-01 00:00:00 UTC
-        let tv_sec: i64 = 946684800;
-        let tv_usec: i64 = 0;
+        let current_time = self.time_manager.get_time();
+        let tv_sec: i64 = current_time.as_secs() as i64;
+        let tv_usec: i64 = current_time.subsec_micros() as i64;
         
         let mut bytes = Vec::with_capacity(16);
         bytes.extend_from_slice(&tv_sec.to_ne_bytes());
@@ -716,87 +1025,33 @@ impl Linux<DeterministicFd> for Deterministic {
             if self.passthru.verbose {
                 println!("futex({:?}, {}, {}, ...) (VIRTUAL)", uaddr, if futex_op == libc::FUTEX_WAIT { "FUTEX_WAIT" } else { "FUTEX_WAIT_BITSET" }, val);
             }
-            
-            let waiter_id;
-            {
-                let mut next_id = self.futexes.next_waiter_id.lock().unwrap();
-                waiter_id = *next_id;
-                *next_id += 1;
-            }
-
-            // Add to waiters BEFORE checking the value to avoid races with WAKE
-            {
-                let mut waiters = self.futexes.waiters.lock().unwrap();
-                let list = waiters.entry(uaddr as u64).or_insert_with(Vec::new);
-                list.push(waiter_id);
-            }
-
-            // Read current value from guest memory
-            let bytes = proc.read_memory(uaddr as usize, 4);
-            if bytes.len() < 4 {
-                let mut waiters = self.futexes.waiters.lock().unwrap();
-                if let Some(list) = waiters.get_mut(&(uaddr as u64)) {
-                    list.retain(|&id| id != waiter_id);
-                }
-                return Err(nix::Error::EFAULT);
-            }
-            let current_val = u32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
-            
-            if current_val != val {
-                let mut waiters = self.futexes.waiters.lock().unwrap();
-                if let Some(list) = waiters.get_mut(&(uaddr as u64)) {
-                    list.retain(|&id| id != waiter_id);
-                }
-                self.skip_syscall(proc);
-                return Err(nix::Error::EAGAIN);
-            }
-
             self.skip_syscall(proc);
 
-            loop {
-                let mut waiters = self.futexes.waiters.lock().unwrap();
-                
-                // Check if we've been removed from the waiters list (meaning we were woken up)
-                let still_waiting = waiters.get(&(uaddr as u64)).map(|l| l.contains(&waiter_id)).unwrap_or(false);
-                if !still_waiting {
-                    return Ok(0);
+            let timeout_dur = if !timeout.is_null() {
+                let bytes = proc.read_memory(timeout as usize, 16);
+                if bytes.len() < 16 {
+                    return Err(nix::Error::EFAULT);
                 }
-
-                if !proc.is_alive() {
-                    return Err(nix::Error::ESRCH);
+                let tv_sec = i64::from_ne_bytes(bytes[0..8].try_into().unwrap());
+                let tv_nsec = i64::from_ne_bytes(bytes[8..16].try_into().unwrap());
+                if tv_sec < 0 || tv_nsec < 0 || tv_nsec >= 1_000_000_000 {
+                    return Err(nix::Error::EINVAL);
                 }
+                Some(Duration::new(tv_sec as u64, tv_nsec as u32))
+            } else {
+                None
+            };
 
-                // Wait for notification
-                let (new_waiters, _timeout_res) = self.futexes.condvar.wait_timeout(waiters, std::time::Duration::from_millis(100)).unwrap();
-                waiters = new_waiters;
-
-                if _timeout_res.timed_out() && !proc.is_alive() {
-                    return Err(nix::Error::ESRCH);
-                }
-            }
+            self.time_manager.futex_wait(proc, uaddr as u64, val, timeout_dur)
         } else if futex_op == libc::FUTEX_WAKE || futex_op == libc::FUTEX_WAKE_BITSET {
             if self.passthru.verbose {
                 println!("futex({:?}, {}, {}, ...) (VIRTUAL)", uaddr, if futex_op == libc::FUTEX_WAKE { "FUTEX_WAKE" } else { "FUTEX_WAKE_BITSET" }, val);
             }
             self.skip_syscall(proc);
-            
-            let mut waiters = self.futexes.waiters.lock().unwrap();
-            if let Some(list) = waiters.get_mut(&(uaddr as u64)) {
-                let to_wake = std::cmp::min(val as usize, list.len());
-                for _ in 0..to_wake {
-                    list.remove(0);
-                }
-                if list.is_empty() {
-                    waiters.remove(&(uaddr as u64));
-                }
-                self.futexes.condvar.notify_all();
-                return Ok(to_wake as i32);
-            }
-            return Ok(0);
+            self.time_manager.futex_wake(uaddr as u64, val)
+        } else {
+            self.passthru.futex(proc, uaddr, op, val, timeout, uaddr2, val3)
         }
-
-        // Fallback for other futex ops
-        self.passthru.futex(proc, uaddr, op, val, timeout, uaddr2, val3)
     }
 
     fn set_tid_address(&mut self, proc: &CapturedProcess, tidptr: *mut c_int) -> nix::Result<c_int> {
@@ -805,14 +1060,56 @@ impl Linux<DeterministicFd> for Deterministic {
     }
 
     fn on_exit(&mut self, _proc: &CapturedProcess) {
-        if let Some(addr) = self.tid_address {
-            if self.passthru.verbose {
-                println!("on_exit: waking tid_address {:#x} (VIRTUAL)", addr);
-            }
-            let mut waiters = self.futexes.waiters.lock().unwrap();
-            waiters.remove(&addr);
-            self.futexes.condvar.notify_all();
+        if self.passthru.verbose {
+            println!("on_exit: waking tid_address {:?} (VIRTUAL)", self.tid_address);
         }
+        self.time_manager.on_exit(self.tid_address);
+    }
+
+    fn nanosleep(&mut self, proc: &CapturedProcess, req: *const libc::timespec, _rem: *mut libc::timespec) -> nix::Result<c_int> {
+        if self.passthru.verbose {
+            println!("nanosleep({:?}, ...) (DETERMINISTIC)", req);
+        }
+        self.skip_syscall(proc);
+
+        let bytes = proc.read_memory(req as usize, 16);
+        if bytes.len() < 16 {
+            return Err(nix::Error::EFAULT);
+        }
+        let tv_sec = i64::from_ne_bytes(bytes[0..8].try_into().unwrap());
+        let tv_nsec = i64::from_ne_bytes(bytes[8..16].try_into().unwrap());
+        if tv_sec < 0 || tv_nsec < 0 || tv_nsec >= 1_000_000_000 {
+            return Err(nix::Error::EINVAL);
+        }
+        let dur = Duration::new(tv_sec as u64, tv_nsec as u32);
+        self.time_manager.sleep(proc, dur)?;
+        Ok(0)
+    }
+
+    fn clock_nanosleep(&mut self, proc: &CapturedProcess, clk_id: libc::clockid_t, flags: c_int, req: *const libc::timespec, _rem: *mut libc::timespec) -> nix::Result<c_int> {
+        if self.passthru.verbose {
+            println!("clock_nanosleep({}, {}, {:?}, ...) (DETERMINISTIC)", clk_id, flags, req);
+        }
+        self.skip_syscall(proc);
+
+        let bytes = proc.read_memory(req as usize, 16);
+        if bytes.len() < 16 {
+            return Err(nix::Error::EFAULT);
+        }
+        let tv_sec = i64::from_ne_bytes(bytes[0..8].try_into().unwrap());
+        let tv_nsec = i64::from_ne_bytes(bytes[8..16].try_into().unwrap());
+        if tv_sec < 0 || tv_nsec < 0 || tv_nsec >= 1_000_000_000 {
+            return Err(nix::Error::EINVAL);
+        }
+        let is_abstime = (flags & libc::TIMER_ABSTIME) != 0;
+        if is_abstime {
+            let target_time = Duration::new(tv_sec as u64, tv_nsec as u32);
+            self.time_manager.sleep_until(proc, target_time)?;
+        } else {
+            let dur = Duration::new(tv_sec as u64, tv_nsec as u32);
+            self.time_manager.sleep(proc, dur)?;
+        }
+        Ok(0)
     }
 
     fn is_verbose(&self) -> bool {

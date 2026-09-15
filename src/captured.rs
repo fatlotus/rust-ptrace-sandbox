@@ -79,6 +79,7 @@ impl CapturedProcess {
     pub fn skip_syscall(&self) -> Result<i64> {
         let orig_regs = self.get_regs()?;
         let mut regs = orig_regs;
+        regs.orig_rax = u64::MAX;
         regs.rax = u64::MAX;
         self.set_regs(regs)?;
         
