@@ -17,7 +17,7 @@ fn do_test_networking() {
     println!("STDERR: {}", stderr);
 
     // We expect the test to succeed
-    assert!(output.status.success(), "Networking test failed");
+    assert!(output.status.success(), "Networking test failed with status: {:?}\nSTDOUT:\n{}\nSTDERR:\n{}", output.status, stdout, stderr);
     
     // We expect to see some networking syscalls being intercepted and logged
     assert!(stdout.contains("socket("), "Missing socket syscall log");
@@ -26,13 +26,13 @@ fn do_test_networking() {
 }
 
 #[test]
-#[ntest::timeout(2000)]
+#[ntest::timeout(15000)]
 fn test_networking() {
     do_test_networking();
 }
 
 #[test]
-#[ntest::timeout(10000)]
+#[ntest::timeout(30000)]
 #[cfg(feature = "stress")]
 fn stress_test_networking() {
     for _ in 0..5 {

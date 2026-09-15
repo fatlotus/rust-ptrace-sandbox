@@ -250,19 +250,25 @@ where
                 println!("Child {} exited with status {}", pid, status);
                 let proc = crate::captured::CapturedProcess::new(pid);
                 handler.on_exit(&proc);
+                if is_initial && status != 0 {
+                    std::process::exit(status);
+                }
                 break;
             }
             WaitStatus::Signaled(_, sig, _) => {
                 println!("Child {} signaled with {}", pid, sig);
                 let proc = crate::captured::CapturedProcess::new(pid);
                 handler.on_exit(&proc);
+                if is_initial {
+                    std::process::exit(128 + sig as i32);
+                }
                 break;
             }
             WaitStatus::Stopped(_, sig) => {
                 if sig == nix::sys::signal::Signal::SIGSEGV || sig == nix::sys::signal::Signal::SIGBUS || sig == nix::sys::signal::Signal::SIGILL || sig == nix::sys::signal::Signal::SIGABRT {
                     let proc = crate::captured::CapturedProcess::new(pid);
                     handler.on_exit(&proc);
-                    break;
+                    std::process::exit(128 + sig as i32);
                 }
                 let _ = ptrace::syscall(pid, None);
             }
