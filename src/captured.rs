@@ -76,6 +76,46 @@ impl CapturedProcess {
         }
     }
 
+    pub fn skip_syscall(&self) -> Result<i64> {
+        let orig_regs = self.get_regs()?;
+        let mut regs = orig_regs;
+        regs.rax = u64::MAX;
+        self.set_regs(regs)?;
+        
+        loop {
+            ptrace::syscall(self.pid, None)?;
+            let status = waitpid(self.pid, None)?;
+            match status {
+                nix::sys::wait::WaitStatus::Exited(_, _) | nix::sys::wait::WaitStatus::Signaled(_, _, _) => {
+                    return Ok(0);
+                }
+                nix::sys::wait::WaitStatus::PtraceSyscall(_) => {
+                    break;
+                }
+                nix::sys::wait::WaitStatus::Stopped(_, sig) => {
+                    if sig == nix::sys::signal::Signal::SIGTRAP {
+                        continue;
+                    }
+                    ptrace::syscall(self.pid, Some(sig))?;
+                }
+                _ => continue,
+            }
+        }
+        
+        if let Ok(mut current_regs) = self.get_regs() {
+            current_regs.rdi = orig_regs.rdi;
+            current_regs.rsi = orig_regs.rsi;
+            current_regs.rdx = orig_regs.rdx;
+            current_regs.r10 = orig_regs.r10;
+            current_regs.r8 = orig_regs.r8;
+            current_regs.r9 = orig_regs.r9;
+            current_regs.rcx = orig_regs.rcx;
+            current_regs.r11 = orig_regs.r11;
+            let _ = self.set_regs(current_regs);
+        }
+        Ok(0)
+    }
+
     pub fn read_memory(&self, addr: usize, count: usize) -> Vec<u8> {
         let mut data = Vec::with_capacity(count);
         let mut read = 0;

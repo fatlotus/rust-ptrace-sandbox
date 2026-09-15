@@ -2,9 +2,14 @@ use std::process::Command;
 
 fn do_test_fork() {
     let ptrace_bin = env!("CARGO_BIN_EXE_ptrace");
+    let shell = if std::path::Path::new("/bin/sh").exists() {
+        "/bin/sh"
+    } else {
+        "/bin/bash"
+    };
     let output = Command::new(ptrace_bin)
         .arg("--verbose")
-        .arg("/bin/bash")
+        .arg(shell)
         .arg("-c")
         .arg("/bin/echo hello from fork")
         .output()

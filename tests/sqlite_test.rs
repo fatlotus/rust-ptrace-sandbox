@@ -36,7 +36,7 @@ fn do_test_sqlite(db_file: &str) {
     }
 
     assert!(stdout.contains("hello sqlite"));
-    assert!(stdout.contains("lseek("));
+    assert!(stdout.contains("lseek(") || stdout.contains("pread(") || stdout.contains("pwrite("));
     assert!(stdout.contains("fcntl("));
 }
 

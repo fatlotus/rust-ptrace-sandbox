@@ -113,7 +113,7 @@ impl Deterministic {
     }
 
     fn skip_syscall(&self, proc: &CapturedProcess) -> i64 {
-        proc.syscall(u64::MAX, 0, 0, 0, 0, 0, 0).unwrap_or(0)
+        proc.skip_syscall().unwrap_or(0)
     }
 }
 

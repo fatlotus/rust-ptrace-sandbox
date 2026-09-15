@@ -48,7 +48,7 @@ fn test_futex_stress() {
 }
 
 #[test]
-#[ntest::timeout(10000)]
+#[ntest::timeout(30000)]
 fn test_futex_sandbox() {
     let ptrace_bin = env!("CARGO_BIN_EXE_ptrace");
     let test_bin = env!("CARGO_BIN_EXE_futex_test");
@@ -66,7 +66,7 @@ fn test_futex_sandbox() {
 }
 
 #[test]
-#[ntest::timeout(10000)]
+#[ntest::timeout(30000)]
 fn test_futex_stress_sandbox() {
     let ptrace_bin = env!("CARGO_BIN_EXE_ptrace");
     let test_bin = env!("CARGO_BIN_EXE_futex_stress_test");

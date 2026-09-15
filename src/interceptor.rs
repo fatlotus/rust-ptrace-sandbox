@@ -258,6 +258,14 @@ where
                 handler.on_exit(&proc);
                 break;
             }
+            WaitStatus::Stopped(_, sig) => {
+                if sig == nix::sys::signal::Signal::SIGSEGV || sig == nix::sys::signal::Signal::SIGBUS || sig == nix::sys::signal::Signal::SIGILL || sig == nix::sys::signal::Signal::SIGABRT {
+                    let proc = crate::captured::CapturedProcess::new(pid);
+                    handler.on_exit(&proc);
+                    break;
+                }
+                let _ = ptrace::syscall(pid, None);
+            }
             _other => {
                 let _ = ptrace::syscall(pid, None);
             }
@@ -844,15 +852,26 @@ where
     }
 }
 
-fn get_fd_mut<Fd>(state: &mut ChildState<Fd>, guest_fd: c_int) -> Option<&mut Fd> {
+fn get_fd_mut<Fd: std::os::unix::io::AsRawFd>(state: &mut ChildState<Fd>, guest_fd: c_int) -> Option<&mut Fd> {
     if guest_fd < 0 {
         return None;
     }
-    state.fd_map.get_mut(&guest_fd)
+    if state.fd_map.contains_key(&guest_fd) {
+        state.fd_map.get_mut(&guest_fd)
+    } else {
+        state.fd_map.values_mut().find(|fd| fd.as_raw_fd() == guest_fd)
+    }
 }
 
-fn take_fd<Fd>(state: &mut ChildState<Fd>, guest_fd: c_int) -> Option<Fd> {
-    state.fd_map.remove(&guest_fd)
+fn take_fd<Fd: std::os::unix::io::AsRawFd>(state: &mut ChildState<Fd>, guest_fd: c_int) -> Option<Fd> {
+    if let Some(fd) = state.fd_map.remove(&guest_fd) {
+        return Some(fd);
+    }
+    let key = state.fd_map.iter().find(|(_, fd)| fd.as_raw_fd() == guest_fd).map(|(k, _)| *k);
+    if let Some(k) = key {
+        return state.fd_map.remove(&k);
+    }
+    None
 }
 
 fn register_fd<Fd>(state: &mut ChildState<Fd>, fd: Fd) -> c_int {

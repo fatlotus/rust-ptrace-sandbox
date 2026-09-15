@@ -33,8 +33,8 @@ fn do_test_cat() {
     assert!(output.status.success(), "cat failed with status: {:?}\nSTDERR: {}", output.status, stderr);
     assert!(stdout.contains("meow world"));
     
-    // Verify syscalls in trace output
-    assert!(stdout.contains("openat("));
+    // Verify syscalls in trace output (openat for GNU coreutils, open for busybox)
+    assert!(stdout.contains("openat(") || stdout.contains("open("));
     assert!(stdout.contains("read("));
     assert!(stdout.contains("write(1,"));
     assert!(stdout.contains("close("));

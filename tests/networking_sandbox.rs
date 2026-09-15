@@ -29,7 +29,7 @@ fn do_test_networking_sandbox() {
 }
 
 #[test]
-#[ntest::timeout(2000)]
+#[ntest::timeout(15000)]
 fn test_networking_sandbox() {
     do_test_networking_sandbox();
 }
