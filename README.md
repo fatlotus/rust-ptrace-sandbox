@@ -26,12 +26,12 @@ cargo run --bin=ptrace -- /bin/cat Cargo.toml
 You can enable a deterministic sandbox mode with the `--sandbox` flag. In this mode, system calls return fixed, predictable values to ensure reproducible execution. This is particularly useful for programs like `bash` that use various sources of entropy for things like `$RANDOM`.
 
 Features made deterministic in sandbox mode:
-- **Time**: `gettimeofday`, `clock_gettime`, `times`.
+- **Time & Time Dilation**: Virtualizes `gettimeofday`, `clock_gettime`, `times`, `nanosleep`, and `clock_nanosleep`. Emulates sleeps by advancing a virtual clock rather than blocking in real time. Concurrent sleeping threads and timed futex waits are scheduled using a min-heap priority queue, advancing virtual time immediately whenever all runnable threads are blocked.
 - **Identity**: `getpid`, `getppid`, `getpgrp`, `getuid`, `geteuid`, `getgid`, `getegid`.
 - **Randomness**: `getrandom` returns a fixed byte pattern.
 - **File Metadata**: `fstat` and `newfstatat` zero out timestamps to remove file modification time entropy.
 - **Inter-Process Communication (IPC)**: Virtualizes networking (`socket`, `bind`, `connect`, `accept`, `listen`, `poll`) to allow simulated communication between sandboxed processes without exposing real network interfaces.
-- **Synchronization**: Virtualizes `futex` (`FUTEX_WAIT`, `FUTEX_WAKE`, `FUTEX_WAIT_BITSET`, `FUTEX_WAKE_BITSET`) to provide deterministic thread synchronization. It handles thread lifecycle by tracking TID addresses via `clone`, `clone3`, and `set_tid_address`.
+- **Synchronization**: Virtualizes `futex` (`FUTEX_WAIT`, `FUTEX_WAKE`, `FUTEX_WAIT_BITSET`, `FUTEX_WAKE_BITSET`) to provide deterministic thread synchronization. Supports timeouts integrated with the timer priority queue and handles thread lifecycle by tracking TID addresses via `clone`, `clone3`, and `set_tid_address`.
 - **System Info**: `uname` and `sysinfo`.
 - **ASLR**: Disables Address Space Layout Randomization (ASLR) in the child process using `personality(ADDR_NO_RANDOMIZE)`.
 
@@ -69,6 +69,12 @@ To run the integration tests:
 cargo test
 ```
 
+On macOS, tests can be run in the bundled Linux QEMU virtual machine:
+
+```bash
+./run-tests.sh
+```
+
 ### Stress Testing
 
 A `stress` feature is available to run each test multiple times (default 100 iterations) to identify non-deterministic failures or race conditions.
@@ -88,7 +94,8 @@ The following tests verify functionality:
 - `tests/fork_test.rs`: Process creation interception (fork, vfork, clone).
 - `tests/networking.rs`: Networking interception (socket, bind, accept, connect).
 - `tests/networking_sandbox.rs`: Verification of networking virtualization in sandbox mode.
-- `tests/futex_test.rs`: Verification of futex system call (used by threads).
+- `tests/futex_test.rs`: Verification of futex system call and multi-threaded sleep simulation with priority queue wake ordering.
+- `tests/sleep_test.rs`: Verification of virtual clock time dilation (10-second sleep completes in < 0.2s real time).
 - `tests/sqlite_test.rs`: SQLite3 support (lseek, unlink, pwrite64, fsync, fdatasync, getcwd).
 - `tests/deterministic_test.rs`: Verification of deterministic time and randomness in sandbox mode.
 
