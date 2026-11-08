@@ -75,7 +75,7 @@ where
             }
             
             let Err(err) = execvp(&c_cmd, &c_args);
-            eprintln!("ptrace: failed to execute '{}': {}", cmd, err);
+            eprintln!("nodice: failed to execute '{}': {}", cmd, err);
             unsafe {
                 libc::_exit(127);
             }

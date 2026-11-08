@@ -50,10 +50,10 @@ pub fn is_guest() -> Option<GuestMode> {
 }
 
 pub fn spawn_guest(test_name: &str, mode: GuestMode) -> GuestOutput {
-    let ptrace_bin = env!("CARGO_BIN_EXE_ptrace");
+    let nodice_bin = env!("CARGO_BIN_EXE_nodice");
     let current_exe = std::env::current_exe().expect("Failed to determine current_exe");
 
-    let mut cmd = Command::new(ptrace_bin);
+    let mut cmd = Command::new(nodice_bin);
     if mode == GuestMode::Passthru {
         cmd.arg("--passthru");
     }
@@ -70,7 +70,7 @@ pub fn spawn_guest(test_name: &str, mode: GuestMode) -> GuestOutput {
         .arg("--test-threads=1")
         .env(GUEST_ENV, mode_str)
         .output()
-        .expect("Failed to spawn ptrace guest");
+        .expect("Failed to spawn nodice guest");
 
     let stdout_raw = String::from_utf8_lossy(&output.stdout).into_owned();
     let stderr_raw = String::from_utf8_lossy(&output.stderr).into_owned();
@@ -235,7 +235,7 @@ where
     }
 }
 
-/// Fluent builder for testing external CLI commands under the `ptrace` binary.
+/// Fluent builder for testing external CLI commands under the `nodice` binary.
 pub struct SandboxCommand {
     program: String,
     args: Vec<String>,
@@ -293,8 +293,8 @@ impl SandboxCommand {
     }
 
     pub fn run(&self) -> CommandResult {
-        let ptrace_bin = env!("CARGO_BIN_EXE_ptrace");
-        let mut cmd = Command::new(ptrace_bin);
+        let nodice_bin = env!("CARGO_BIN_EXE_nodice");
+        let mut cmd = Command::new(nodice_bin);
         if self.passthru {
             cmd.arg("--passthru");
         }
@@ -309,7 +309,7 @@ impl SandboxCommand {
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .spawn()
-                .expect("Failed to spawn ptrace command");
+                .expect("Failed to spawn nodice command");
             child
                 .stdin
                 .take()
@@ -318,7 +318,7 @@ impl SandboxCommand {
                 .expect("Failed to write to stdin");
             child.wait_with_output().expect("Failed to wait on child")
         } else {
-            cmd.output().expect("Failed to execute ptrace command")
+            cmd.output().expect("Failed to execute nodice command")
         };
 
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();

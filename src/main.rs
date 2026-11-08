@@ -1,6 +1,6 @@
-use ptrace::deterministic::Deterministic;
-use ptrace::interceptor::run_with_interceptor;
-use ptrace::passthru::Passthru;
+use nodice::deterministic::Deterministic;
+use nodice::interceptor::run_with_interceptor;
+use nodice::passthru::Passthru;
 
 fn parse_jitter_ns(val: &str) -> Option<u64> {
     let s = val.trim();
