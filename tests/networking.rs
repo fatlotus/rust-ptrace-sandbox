@@ -5,6 +5,7 @@ fn do_test_networking() {
     let networking_bin = env!("CARGO_BIN_EXE_networking_test");
 
     let output = Command::new(ptrace_bin)
+        .arg("--passthru")
         .arg("--verbose")
         .arg(networking_bin)
         .output()

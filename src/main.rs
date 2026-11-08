@@ -16,7 +16,7 @@ fn main() {
         std::process::exit(1);
     }
 
-    let mut sandbox = false;
+    let mut sandbox = true;
     let mut verbose = false;
     let mut cmd_start_idx = 1;
 
@@ -24,7 +24,10 @@ fn main() {
         if args[i] == "--sandbox" {
             sandbox = true;
             cmd_start_idx = i + 1;
-        } else if args[i] == "--verbose" {
+        } else if args[i] == "--passthru" || args[i] == "--no-sandbox" {
+            sandbox = false;
+            cmd_start_idx = i + 1;
+        } else if args[i] == "--verbose" || args[i] == "-v" {
             verbose = true;
             cmd_start_idx = i + 1;
         } else {
@@ -48,5 +51,5 @@ fn main() {
 }
 
 fn print_usage(program: &str) {
-    eprintln!("Usage: {} [--sandbox] [--verbose] <command> [args...]", program);
+    eprintln!("Usage: {} [--passthru] [--verbose] <command> [args...]", program);
 }

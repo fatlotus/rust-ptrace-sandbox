@@ -5,13 +5,11 @@ fn do_test_random_gen_deterministic() {
     let random_gen_bin = env!("CARGO_BIN_EXE_random_gen");
 
     let output1 = Command::new(ptrace_bin)
-        .arg("--sandbox")
         .arg(random_gen_bin)
         .output()
         .expect("Failed to execute ptrace bin");
 
     let output2 = Command::new(ptrace_bin)
-        .arg("--sandbox")
         .arg(random_gen_bin)
         .output()
         .expect("Failed to execute ptrace bin");
@@ -130,7 +128,6 @@ fn test_shell_sleep_and_exit_code() {
     // Verify `/bin/sh -c "/bin/sleep 1"` completes quickly via virtual time dilation even when parent blocks in wait4
     let sleep_start = std::time::Instant::now();
     let sh_sleep = Command::new(ptrace_bin)
-        .arg("--sandbox")
         .arg("/bin/sh")
         .arg("-c")
         .arg("/bin/sleep 1")
@@ -140,7 +137,6 @@ fn test_shell_sleep_and_exit_code() {
     assert!(sleep_start.elapsed().as_millis() < 500);
 
     let false_out = Command::new(ptrace_bin)
-        .arg("--sandbox")
         .arg("/bin/sh")
         .arg("-c")
         .arg("exit 42")
@@ -154,11 +150,13 @@ fn do_test_random_gen_nondeterministic() {
     let random_gen_bin = env!("CARGO_BIN_EXE_random_gen");
 
     let output1 = Command::new(ptrace_bin)
+        .arg("--passthru")
         .arg(random_gen_bin)
         .output()
         .expect("Failed to execute ptrace bin");
 
     let output2 = Command::new(ptrace_bin)
+        .arg("--passthru")
         .arg(random_gen_bin)
         .output()
         .expect("Failed to execute ptrace bin");

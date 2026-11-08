@@ -1,114 +1,62 @@
-# Typed system call interception in Rust
+# rust-ptrace-sandbox
 
-This project implements a system call interceptor using `ptrace` in Rust, allowing system calls to be handled via a typed trait.
+A `ptrace`-based deterministic execution sandbox for Linux `x86_64` processes, written in Rust.
 
-## Goal
+By default, `ptrace` runs target programs inside a **deterministic sandbox** that intercepts system calls, traps hardware non-determinism instructions (`RDTSC`, `RDTSCP`, `CPUID`, `RDRAND`, `RDSEED`), disables the vDSO and ASLR, and virtualizes pipes, loopback sockets, futexes, and clocks so consecutive executions produce identical results.
 
-Make it possible to implement all system calls of a target process using safe Rust.
+## Features
+
+- **Deterministic Time & Instant Sleep**: Virtualizes `clock_gettime`, `gettimeofday`, `time`, `clock_getres`, `nanosleep`, `clock_nanosleep`, `alarm`, `setitimer`, `getitimer`, `timerfd_*`, and `sysinfo` starting at a fixed epoch (`2022-01-01 00:00:00 UTC`). Multi-threaded sleeps wake in deterministic deadline order without waiting on wall-clock time.
+- **Deterministic Entropy & Process Identity**:
+  - Scrubs `AT_RANDOM` in the initial auxiliary vector (`auxv`) and disables `AT_SYSINFO_EHDR` (vDSO) so `libc` time and randomness calls always trap into the kernel.
+  - Disables ASLR (`ADDR_NO_RANDOMIZE`) across `execve`.
+  - Virtualizes `getrandom`, `/dev/random`, and `/dev/urandom` using a seeded ChaCha8 PRNG.
+  - Virtualizes `getpid`, `getppid`, `gettid`, UIDs/GIDs, `uname`, `/proc/self/stat`, `/proc/self/maps`, and `/proc/sys/kernel/random/uuid`.
+- **Hardware Instruction Trap Emulation**:
+  - Disables raw timestamp counter instructions via `prctl(PR_SET_TSC, PR_TSC_SIGSEGV)` and emulates `RDTSC` / `RDTSCP` with virtual clock ticks.
+  - Emulates `CPUID` and clears `RDRAND` / `RDSEED` feature bits, trapping and deterministically emulating direct `RDRAND` / `RDSEED` instructions.
+- **User-Space Virtual IPC & Loopback Networking**:
+  - Emulates `pipe`/`pipe2`, `socketpair`, and loopback TCP (`socket`, `bind`, `listen`, `accept`/`accept4`, `connect`, `getsockname`, `getpeername`, `read`/`write`, `recvfrom`/`sendto`, `recvmsg`/`sendmsg`) in user space.
+  - Emulates `futex` (`FUTEX_WAIT`, `FUTEX_WAIT_BITSET`, `FUTEX_WAKE`, `FUTEX_REQUEUE`, `FUTEX_CMP_REQUEUE`) and readiness polling (`poll`, `ppoll`, `select`, `pselect6`, `epoll_*`) deterministically.
+- **Filesystem Metadata Normalization**:
+  - Normalizes inode numbers, device IDs, ownership, block sizes, and timestamps across `stat`, `lstat`, `fstat`, `newfstatat`, and `statx`.
 
 ## Usage
 
-You can run commands like `echo`, `date`, and `cat` under the ptrace sandbox:
+Run any command inside the deterministic sandbox (default):
 
 ```bash
-cargo run --bin=ptrace -- /bin/echo "hello world"
-cargo run --bin=ptrace -- /bin/date
-cargo run --bin=ptrace -- /bin/cat Cargo.toml
+cargo run -- <command> [args...]
 ```
 
-### Options
+Options:
+- `--verbose`, `-v`: Log intercepted syscalls, virtualized operations, and scheduler state transitions to `stderr`.
+- `--passthru`, `--no-sandbox`: Disable deterministic virtualization and only trace/log syscalls as they pass through to the host kernel.
+- `--sandbox`: Explicitly enable deterministic sandbox mode (enabled by default).
 
-- `--sandbox`: Enable deterministic mode (fixed time and randomness).
-- `--verbose`: Print all intercepted system calls and their results.
-
-### Sandbox Mode (Deterministic)
-
-You can enable a deterministic sandbox mode with the `--sandbox` flag. In this mode, system calls return fixed, predictable values to ensure reproducible execution. This is particularly useful for programs like `bash` that use various sources of entropy for things like `$RANDOM`.
-
-Features made deterministic in sandbox mode:
-- **Time & Time Dilation**: Virtualizes `gettimeofday`, `clock_gettime`, `times`, `nanosleep`, and `clock_nanosleep`. Emulates sleeps by advancing a virtual clock rather than blocking in real time. Concurrent sleeping threads and timed futex waits are scheduled using a min-heap priority queue, advancing virtual time immediately whenever all runnable threads are blocked.
-- **Identity**: `getpid`, `getppid`, `getpgrp`, `getuid`, `geteuid`, `getgid`, `getegid`.
-- **Randomness**: `getrandom` returns a fixed byte pattern.
-- **File Metadata**: `fstat` and `newfstatat` zero out timestamps to remove file modification time entropy.
-- **Inter-Process Communication (IPC)**: Virtualizes networking (`socket`, `bind`, `connect`, `accept`, `listen`, `poll`) to allow simulated communication between sandboxed processes without exposing real network interfaces.
-- **Synchronization**: Virtualizes `futex` (`FUTEX_WAIT`, `FUTEX_WAKE`, `FUTEX_WAIT_BITSET`, `FUTEX_WAKE_BITSET`) to provide deterministic thread synchronization. Supports timeouts integrated with the timer priority queue and handles thread lifecycle by tracking TID addresses via `clone`, `clone3`, and `set_tid_address`.
-- **System Info**: `uname` and `sysinfo`.
-- **ASLR**: Disables Address Space Layout Randomization (ASLR) in the child process using `personality(ADDR_NO_RANDOMIZE)`.
+### Examples
 
 ```bash
-cargo run --bin=ptrace -- --sandbox /bin/bash -c 'echo $RANDOM'
-cargo run --bin=ptrace -- --sandbox target/debug/random_gen
+# Run `date` inside the deterministic sandbox (always prints Sat Jan  1 00:00:00 UTC 2022)
+cargo run -- date -u
+
+# Run a command with verbose syscall tracing
+cargo run -- --verbose echo "Hello, sandbox!"
+
+# Run in passthru mode without sandboxing
+cargo run -- --passthru date
 ```
 
-### Verbose Mode
+## Running Tests
 
-By default, debugging output is hidden. Use the `--verbose` flag to see the intercepted system calls:
+Run the test suite:
 
 ```bash
-cargo run --bin=ptrace -- --verbose /bin/echo "hello world"
+cargo test --target x86_64-unknown-linux-gnu
 ```
 
-## Code Layout
-
-- `src/linux.rs`: The `Linux` trait which defines system calls. It is now generic over a file descriptor type `Fd`, allowing implementations to define what a file descriptor represents. It returns `nix::Result` and each method receives a `&CapturedProcess` to interact with the tracee.
-- `src/passthru.rs`: A "passthru" implementation of the `Linux` trait that uses a `PassthruFd` struct (wrapping a `c_int`). It logs and forwards syscalls to the native OS by executing them directly in the tracee context via `CapturedProcess`.
-- `src/captured.rs`: The `CapturedProcess` struct which encapsulates `ptrace` operations, providing high-level methods for system call injection and memory access in the tracee.
-- `src/vdso.rs`: Logic to disable the virtual Dynamic Shared Object (vDSO) in tracee processes.
-- `src/deterministic.rs`: A deterministic implementation of the `Linux` trait that overrides time and randomness syscalls.
-- `src/interceptor.rs`: The core logic that handles the ptrace loop. it maintains a mapping between guest `c_int` file descriptors and the generic `Fd` type used by the `Linux` implementation.
-
-- `src/main.rs`: The CLI entry point.
-
-## Testing
-
-All tests are located in the `tests/` directory.
-
-To run the integration tests:
+Run the stress test suite:
 
 ```bash
-cargo test
+cargo test --target x86_64-unknown-linux-gnu --features stress
 ```
-
-On macOS, tests can be run in the bundled Linux QEMU virtual machine:
-
-```bash
-./run-tests.sh
-```
-
-### Stress Testing
-
-A `stress` feature is available to run each test multiple times (default 100 iterations) to identify non-deterministic failures or race conditions.
-
-```bash
-cargo test --features stress
-```
-
-### Test Timeouts
-
-All tests are configured with a 1-second timeout using the `ntest` crate to ensure they complete within a reasonable timeframe and to catch potential deadlocks.
-
-The following tests verify functionality:
-- `tests/echo_test.rs`: Basic write/brk interception.
-- `tests/cat_test.rs`: File IO interception (openat, read, write, close).
-- `tests/date_test.rs`: Time interception (clock_gettime).
-- `tests/fork_test.rs`: Process creation interception (fork, vfork, clone).
-- `tests/networking.rs`: Networking interception (socket, bind, accept, connect).
-- `tests/networking_sandbox.rs`: Verification of networking virtualization in sandbox mode.
-- `tests/futex_test.rs`: Verification of futex system call and multi-threaded sleep simulation with priority queue wake ordering.
-- `tests/sleep_test.rs`: Verification of virtual clock time dilation (10-second sleep completes in < 0.2s real time).
-- `tests/sqlite_test.rs`: SQLite3 support (lseek, unlink, pwrite64, fsync, fdatasync, getcwd).
-- `tests/deterministic_test.rs`: Verification of deterministic time and randomness in sandbox mode.
-
-## Parallel Tracing
-
-The interceptor now supports parallel tracing of multi-process and multi-threaded applications. 
-- Each process and thread is served by its own instance of the `Linux` trait.
-- Tracing loops run in separate host threads to allow concurrent tracee execution.
-- Per-process/thread state (like file descriptor maps) is isolated.
-
-This is verified by the `networking` test, which spawns a background thread to handle socket operations concurrently with the main thread.
-
-## Limitations
-
-- The `Passthru` implementation of `exit` and `exit_group` now correctly passes the syscall to the child process instead of killing the tracer.
-- `fork`, `vfork`, and `clone` are intercepted to allow tracing of child processes.

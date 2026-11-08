@@ -9,7 +9,6 @@ fn test_sleep_time_dilation() {
 
     let real_start = Instant::now();
     let output = Command::new(ptrace_bin)
-        .arg("--sandbox")
         .arg(test_bin)
         .output()
         .expect("Failed to execute ptrace bin");

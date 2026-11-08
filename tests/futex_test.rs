@@ -5,6 +5,7 @@ fn do_test_futex(bin: &str, verbose: bool) {
     let test_bin = bin;
     
     let mut cmd = Command::new(ptrace_bin);
+    cmd.arg("--passthru");
     if verbose {
         cmd.arg("--verbose");
     }
@@ -55,7 +56,6 @@ fn test_futex_sandbox() {
     
     let start = std::time::Instant::now();
     let output = Command::new(ptrace_bin)
-        .arg("--sandbox")
         .arg(test_bin)
         .output()
         .expect("Failed to execute ptrace bin");
@@ -78,7 +78,6 @@ fn test_futex_stress_sandbox() {
     let test_bin = env!("CARGO_BIN_EXE_futex_stress_test");
     
     let output = Command::new(ptrace_bin)
-        .arg("--sandbox")
         .arg(test_bin)
         .output()
         .expect("Failed to execute ptrace bin");
