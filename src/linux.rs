@@ -33,14 +33,22 @@ pub trait Linux<Fd> {
     /// close() closes a file descriptor, so that it no longer refers to any file and may be reused.
     fn close(&mut self, proc: &CapturedProcess, fd: Fd) -> nix::Result<c_int>;
 
-    /// stat, fstat, lstat, fstatat - get file status
+    /// stat, fstat, lstat, fstatat, statx - get file status
     ///
     /// These functions return information about a file, in the buffer pointed to by statbuf.
+    fn stat(&mut self, proc: &CapturedProcess, pathname: &str) -> nix::Result<c_int>;
+
+    fn lstat(&mut self, proc: &CapturedProcess, pathname: &str) -> nix::Result<c_int>;
+
     fn fstat(&mut self, proc: &CapturedProcess, fd: &mut Fd) -> nix::Result<c_int>;
 
     /// newfstatat - get file status relative to a directory file descriptor
     /// dirfd: None means AT_FDCWD
     fn newfstatat(&mut self, proc: &CapturedProcess, dirfd: Option<&mut Fd>, pathname: &str, flags: c_int) -> nix::Result<c_int>;
+
+    /// statx - get file status (extended)
+    /// dirfd: None means AT_FDCWD
+    fn statx(&mut self, proc: &CapturedProcess, dirfd: Option<&mut Fd>, pathname: &str, flags: c_int, mask: libc::c_uint) -> nix::Result<c_int>;
 
     /// mmap, munmap - map or unmap files or devices into memory
     ///

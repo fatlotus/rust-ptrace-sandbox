@@ -91,6 +91,8 @@ struct TimeInner {
     timers: BinaryHeap<TimerEvent>,
     waiters: HashMap<usize, WaiterStatus>,
     futex_waiters: HashMap<u64, Vec<usize>>,
+    ino_map: HashMap<u64, u64>,
+    next_ino: u64,
 }
 
 pub struct TimeManager {
@@ -109,8 +111,22 @@ impl TimeManager {
                 timers: BinaryHeap::new(),
                 waiters: HashMap::new(),
                 futex_waiters: HashMap::new(),
+                ino_map: HashMap::new(),
+                next_ino: 1,
             }),
             condvar: Condvar::new(),
+        }
+    }
+
+    pub fn get_deterministic_ino(&self, orig_ino: u64) -> u64 {
+        let mut inner = self.inner.lock().unwrap();
+        if let Some(&det_ino) = inner.ino_map.get(&orig_ino) {
+            det_ino
+        } else {
+            let det_ino = inner.next_ino;
+            inner.next_ino += 1;
+            inner.ino_map.insert(orig_ino, det_ino);
+            det_ino
         }
     }
 
@@ -406,17 +422,47 @@ impl Deterministic {
 
     fn patch_stat(&self, proc: &CapturedProcess, addr: usize) {
         // struct stat on x86_64:
+        // st_dev (0..8), st_ino (8..16), st_uid (28..32), st_gid (32..36),
         // atime (72..88), mtime (88..104), ctime (104..120)
         
         let mut bytes = proc.read_memory(addr, 120); // Only need up to ctime
         if bytes.len() < 120 { return; }
         
+        let orig_ino = u64::from_ne_bytes(bytes[8..16].try_into().unwrap());
+        let det_ino = self.time_manager.get_deterministic_ino(orig_ino);
+        bytes[0..8].copy_from_slice(&1u64.to_ne_bytes());
+        bytes[8..16].copy_from_slice(&det_ino.to_ne_bytes());
+        bytes[28..32].copy_from_slice(&1000u32.to_ne_bytes());
+        bytes[32..36].copy_from_slice(&1000u32.to_ne_bytes());
         // Zero out timestamps (atim 72..88, mtim 88..104, ctim 104..120)
         for i in 72..120 { bytes[i] = 0; }
         
         proc.write_memory(addr, &bytes);
         if self.passthru.verbose {
-            println!("path_stat({:#x}) (DETERMINISTIC)", addr);
+            println!("patch_stat({:#x}) (DETERMINISTIC)", addr);
+        }
+    }
+
+    fn patch_statx(&self, proc: &CapturedProcess, addr: usize) {
+        // struct statx on x86_64:
+        // stx_uid (20..24), stx_gid (24..28), stx_ino (32..40),
+        // stx_atime (64..80), stx_btime (80..96), stx_ctime (96..112), stx_mtime (112..128),
+        // stx_dev_major (136..140), stx_dev_minor (140..144)
+        let mut bytes = proc.read_memory(addr, 144);
+        if bytes.len() < 144 { return; }
+
+        let orig_ino = u64::from_ne_bytes(bytes[32..40].try_into().unwrap());
+        let det_ino = self.time_manager.get_deterministic_ino(orig_ino);
+        bytes[20..24].copy_from_slice(&1000u32.to_ne_bytes());
+        bytes[24..28].copy_from_slice(&1000u32.to_ne_bytes());
+        bytes[32..40].copy_from_slice(&det_ino.to_ne_bytes());
+        for i in 64..128 { bytes[i] = 0; }
+        bytes[136..140].copy_from_slice(&0u32.to_ne_bytes());
+        bytes[140..144].copy_from_slice(&1u32.to_ne_bytes());
+
+        proc.write_memory(addr, &bytes);
+        if self.passthru.verbose {
+            println!("patch_statx({:#x}) (DETERMINISTIC)", addr);
         }
     }
 
@@ -490,6 +536,24 @@ impl Linux<DeterministicFd> for Deterministic {
         }
     }
 
+    fn stat(&mut self, proc: &CapturedProcess, pathname: &str) -> nix::Result<c_int> {
+        let regs = proc.get_regs()?;
+        let res = self.passthru.stat(proc, pathname)?;
+        if res == 0 {
+            self.patch_stat(proc, regs.rsi as usize);
+        }
+        Ok(res)
+    }
+
+    fn lstat(&mut self, proc: &CapturedProcess, pathname: &str) -> nix::Result<c_int> {
+        let regs = proc.get_regs()?;
+        let res = self.passthru.lstat(proc, pathname)?;
+        if res == 0 {
+            self.patch_stat(proc, regs.rsi as usize);
+        }
+        Ok(res)
+    }
+
     fn fstat(&mut self, proc: &CapturedProcess, fd: &mut DeterministicFd) -> nix::Result<c_int> {
         match fd {
             DeterministicFd::Passthru(f) | DeterministicFd::VirtualRandom(f) => {
@@ -501,7 +565,26 @@ impl Linux<DeterministicFd> for Deterministic {
                 Ok(res)
             }
             DeterministicFd::Virtualized(_) => {
-                // TODO: Implement fstat for virtualized sockets
+                let regs = proc.get_regs()?;
+                self.skip_syscall(proc);
+                if regs.rsi == 0 {
+                    return Err(nix::Error::EFAULT);
+                }
+                let mut st: libc::stat = unsafe { std::mem::zeroed() };
+                st.st_dev = 1;
+                st.st_ino = 1;
+                st.st_nlink = 1;
+                st.st_mode = libc::S_IFSOCK | 0o666;
+                st.st_uid = 1000;
+                st.st_gid = 1000;
+                st.st_blksize = 4096;
+                let bytes = unsafe {
+                    std::slice::from_raw_parts(
+                        &st as *const libc::stat as *const u8,
+                        std::mem::size_of::<libc::stat>(),
+                    )
+                };
+                proc.write_memory(regs.rsi as usize, bytes);
                 Ok(0)
             }
         }
@@ -516,6 +599,19 @@ impl Linux<DeterministicFd> for Deterministic {
         let res = self.passthru.newfstatat(proc, p_dirfd, pathname, flags)?;
         if res == 0 {
             self.patch_stat(proc, regs.rdx as usize);
+        }
+        Ok(res)
+    }
+
+    fn statx(&mut self, proc: &CapturedProcess, dirfd: Option<&mut DeterministicFd>, pathname: &str, flags: c_int, mask: libc::c_uint) -> nix::Result<c_int> {
+        let p_dirfd = match dirfd {
+            Some(DeterministicFd::Passthru(f)) | Some(DeterministicFd::VirtualRandom(f)) => Some(f),
+            _ => None,
+        };
+        let regs = proc.get_regs()?;
+        let res = self.passthru.statx(proc, p_dirfd, pathname, flags, mask)?;
+        if res == 0 {
+            self.patch_statx(proc, regs.r8 as usize);
         }
         Ok(res)
     }

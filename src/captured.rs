@@ -181,12 +181,24 @@ impl CapturedProcess {
         self.syscall(libc::SYS_close as u64, fd as u64, 0, 0, 0, 0, 0)
     }
 
+    pub fn stat(&self, addr: u64, statbuf: u64) -> Result<i64> {
+        self.syscall(libc::SYS_stat as u64, addr, statbuf, 0, 0, 0, 0)
+    }
+
+    pub fn lstat(&self, addr: u64, statbuf: u64) -> Result<i64> {
+        self.syscall(libc::SYS_lstat as u64, addr, statbuf, 0, 0, 0, 0)
+    }
+
     pub fn fstat(&self, fd: c_int, addr: u64) -> Result<i64> {
         self.syscall(libc::SYS_fstat as u64, fd as u64, addr, 0, 0, 0, 0)
     }
 
     pub fn newfstatat(&self, dirfd: c_int, addr: u64, statbuf: u64, flags: c_int) -> Result<i64> {
         self.syscall(libc::SYS_newfstatat as u64, dirfd as u64, addr, statbuf, flags as u64, 0, 0)
+    }
+
+    pub fn statx(&self, dirfd: c_int, addr: u64, flags: c_int, mask: libc::c_uint, statxbuf: u64) -> Result<i64> {
+        self.syscall(libc::SYS_statx as u64, dirfd as u64, addr, flags as u64, mask as u64, statxbuf, 0)
     }
 
     pub fn mmap(&self, addr: *mut c_void, length: usize, prot: c_int, flags: c_int, fd: c_int, offset: off_t) -> Result<i64> {

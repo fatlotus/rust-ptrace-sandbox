@@ -81,6 +81,24 @@ impl Linux<PassthruFd> for Passthru {
         Ok(res as c_int)
     }
 
+    fn stat(&mut self, proc: &CapturedProcess, pathname: &str) -> nix::Result<c_int> {
+        let regs = proc.get_regs()?;
+        let res = proc.stat(regs.rdi, regs.rsi)?;
+        if self.verbose {
+            println!("stat({:?}, ...) = {}", pathname, res);
+        }
+        Ok(res as c_int)
+    }
+
+    fn lstat(&mut self, proc: &CapturedProcess, pathname: &str) -> nix::Result<c_int> {
+        let regs = proc.get_regs()?;
+        let res = proc.lstat(regs.rdi, regs.rsi)?;
+        if self.verbose {
+            println!("lstat({:?}, ...) = {}", pathname, res);
+        }
+        Ok(res as c_int)
+    }
+
     fn fstat(&mut self, proc: &CapturedProcess, fd: &mut PassthruFd) -> nix::Result<c_int> {
         let regs = proc.get_regs()?;
         let res = proc.fstat(fd.0, regs.rsi)?;
@@ -96,6 +114,16 @@ impl Linux<PassthruFd> for Passthru {
         let res = proc.newfstatat(dirfd_val, regs.rsi, regs.rdx, flags)?;
         if self.verbose {
             println!("newfstatat({}, {:?}, ..., {}) = {}", dirfd_val, pathname, flags, res);
+        }
+        Ok(res as c_int)
+    }
+
+    fn statx(&mut self, proc: &CapturedProcess, dirfd: Option<&mut PassthruFd>, pathname: &str, flags: c_int, mask: libc::c_uint) -> nix::Result<c_int> {
+        let regs = proc.get_regs()?;
+        let dirfd_val = dirfd.map(|fd| fd.0).unwrap_or(libc::AT_FDCWD);
+        let res = proc.statx(dirfd_val, regs.rsi, flags, mask, regs.r8)?;
+        if self.verbose {
+            println!("statx({}, {:?}, {}, {}, ...) = {}", dirfd_val, pathname, flags, mask, res);
         }
         Ok(res as c_int)
     }

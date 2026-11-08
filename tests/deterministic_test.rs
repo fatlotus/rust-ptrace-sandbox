@@ -55,6 +55,16 @@ fn do_test_random_gen_deterministic() {
     let at_rand2 = stdout2.lines().find(|l| l.contains("AT_RANDOM:")).unwrap();
     assert_eq!(at_rand1, at_rand2);
     assert_eq!(at_rand1, "AT_RANDOM: [66, 66, 66, 66, 66, 66, 66, 66, 66, 66, 66, 66, 66, 66, 66, 66]");
+
+    let stat1 = stdout1.lines().find(|l| l.contains("Stat:")).unwrap();
+    let stat2 = stdout2.lines().find(|l| l.contains("Stat:")).unwrap();
+    assert_eq!(stat1, stat2);
+    assert!(stat1.ends_with("mtime=0"));
+
+    let statx1 = stdout1.lines().find(|l| l.contains("Statx:")).unwrap();
+    let statx2 = stdout2.lines().find(|l| l.contains("Statx:")).unwrap();
+    assert_eq!(statx1, statx2);
+    assert!(statx1.ends_with("mtime=0"));
 }
 
 fn do_test_random_gen_nondeterministic() {

@@ -352,6 +352,22 @@ where
                 Some(-libc::EBADF as i64)
             }
         }
+        Some(Sysno::stat) => {
+            let addr = regs.rdi as usize;
+            let pathname = read_string(pid, addr);
+            match handler.stat(&proc, &pathname) {
+                Ok(res) => Some(res as i64),
+                Err(err) => Some(-(err as i32) as i64),
+            }
+        }
+        Some(Sysno::lstat) => {
+            let addr = regs.rdi as usize;
+            let pathname = read_string(pid, addr);
+            match handler.lstat(&proc, &pathname) {
+                Ok(res) => Some(res as i64),
+                Err(err) => Some(-(err as i32) as i64),
+            }
+        }
         Some(Sysno::fstat) => {
             if let Some(fd) = get_fd_mut(state, regs.rdi as i32) {
                 match handler.fstat(&proc, fd) {
@@ -413,6 +429,17 @@ where
             let flags = regs.r10 as i32;
             let pathname = read_string(pid, addr);
             match handler.newfstatat(&proc, dirfd_opt, &pathname, flags) {
+                Ok(res) => Some(res as i64),
+                Err(err) => Some(-(err as i32) as i64),
+            }
+        }
+        Some(Sysno::statx) => {
+            let dirfd_opt = get_fd_mut(state, regs.rdi as i32);
+            let addr = regs.rsi as usize;
+            let flags = regs.rdx as i32;
+            let mask = regs.r10 as libc::c_uint;
+            let pathname = read_string(pid, addr);
+            match handler.statx(&proc, dirfd_opt, &pathname, flags, mask) {
                 Ok(res) => Some(res as i64),
                 Err(err) => Some(-(err as i32) as i64),
             }

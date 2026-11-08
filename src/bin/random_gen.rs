@@ -40,5 +40,15 @@ fn main() {
         let bad_rand = libc::syscall(libc::SYS_getrandom, std::ptr::null_mut::<u8>(), usize::MAX, 0);
         let bad_sleep = libc::syscall(libc::SYS_nanosleep, std::ptr::null::<libc::timespec>(), std::ptr::null_mut::<libc::timespec>());
         println!("Faults: getrandom={} nanosleep={}", bad_rand, bad_sleep);
+
+        let mut st: libc::stat = std::mem::zeroed();
+        if libc::syscall(libc::SYS_stat, b"/etc/hosts\0".as_ptr(), &mut st as *mut libc::stat) == 0 {
+            println!("Stat: ino={} mtime={}", st.st_ino, st.st_mtime);
+        }
+    }
+
+    if let Ok(meta) = std::fs::metadata("/etc/hosts") {
+        use std::os::unix::fs::MetadataExt;
+        println!("Statx: ino={} mtime={}", meta.ino(), meta.mtime());
     }
 }
