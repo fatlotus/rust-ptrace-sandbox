@@ -11,12 +11,13 @@ use std::cmp::Ordering;
 pub enum DeterministicFd {
     Passthru(PassthruFd),
     Virtualized(usize),
+    VirtualRandom(PassthruFd),
 }
 
 impl std::os::unix::io::AsRawFd for DeterministicFd {
     fn as_raw_fd(&self) -> c_int {
         match self {
-            DeterministicFd::Passthru(f) => f.0,
+            DeterministicFd::Passthru(f) | DeterministicFd::VirtualRandom(f) => f.0,
             DeterministicFd::Virtualized(_) => -1,
         }
     }
@@ -434,12 +435,13 @@ impl Linux<DeterministicFd> for Deterministic {
         match fd {
             DeterministicFd::Passthru(f) => DeterministicFd::Passthru(self.passthru.dup_fd(f)),
             DeterministicFd::Virtualized(idx) => DeterministicFd::Virtualized(*idx),
+            DeterministicFd::VirtualRandom(f) => DeterministicFd::VirtualRandom(self.passthru.dup_fd(f)),
         }
     }
 
     fn write(&mut self, proc: &CapturedProcess, fd: &mut DeterministicFd, buf: &[u8]) -> nix::Result<usize> {
         match fd {
-            DeterministicFd::Passthru(f) => self.passthru.write(proc, f, buf),
+            DeterministicFd::Passthru(f) | DeterministicFd::VirtualRandom(f) => self.passthru.write(proc, f, buf),
             DeterministicFd::Virtualized(idx) => self.virtual_write(proc, *idx, buf),
         }
     }
@@ -448,31 +450,49 @@ impl Linux<DeterministicFd> for Deterministic {
         match fd {
             DeterministicFd::Passthru(f) => self.passthru.read(proc, f, count),
             DeterministicFd::Virtualized(idx) => self.virtual_read(proc, *idx, count),
+            DeterministicFd::VirtualRandom(_) => {
+                self.skip_syscall(proc);
+                let n = std::cmp::min(count, 65536);
+                if self.passthru.verbose {
+                    println!("read(urandom, ..., {}) = {} (DETERMINISTIC)", count, n);
+                }
+                Ok(vec![0x42u8; n])
+            }
         }
     }
 
     fn open(&mut self, proc: &CapturedProcess, pathname: &str, flags: c_int, mode: mode_t) -> nix::Result<DeterministicFd> {
-        self.passthru.open(proc, pathname, flags, mode).map(DeterministicFd::Passthru)
+        let fd = self.passthru.open(proc, pathname, flags, mode)?;
+        if pathname == "/dev/urandom" || pathname == "/dev/random" {
+            Ok(DeterministicFd::VirtualRandom(fd))
+        } else {
+            Ok(DeterministicFd::Passthru(fd))
+        }
     }
 
     fn openat(&mut self, proc: &CapturedProcess, dirfd: Option<&mut DeterministicFd>, pathname: &str, flags: c_int, mode: mode_t) -> nix::Result<DeterministicFd> {
         let p_dirfd = match dirfd {
-            Some(DeterministicFd::Passthru(f)) => Some(f),
+            Some(DeterministicFd::Passthru(f)) | Some(DeterministicFd::VirtualRandom(f)) => Some(f),
             _ => None, // Virtualized FDs shouldn't be dirfds for now
         };
-        self.passthru.openat(proc, p_dirfd, pathname, flags, mode).map(DeterministicFd::Passthru)
+        let fd = self.passthru.openat(proc, p_dirfd, pathname, flags, mode)?;
+        if pathname == "/dev/urandom" || pathname == "/dev/random" {
+            Ok(DeterministicFd::VirtualRandom(fd))
+        } else {
+            Ok(DeterministicFd::Passthru(fd))
+        }
     }
 
     fn close(&mut self, proc: &CapturedProcess, fd: DeterministicFd) -> nix::Result<c_int> {
         match fd {
-            DeterministicFd::Passthru(f) => self.passthru.close(proc, f),
+            DeterministicFd::Passthru(f) | DeterministicFd::VirtualRandom(f) => self.passthru.close(proc, f),
             DeterministicFd::Virtualized(idx) => self.virtual_close(proc, idx),
         }
     }
 
     fn fstat(&mut self, proc: &CapturedProcess, fd: &mut DeterministicFd) -> nix::Result<c_int> {
         match fd {
-            DeterministicFd::Passthru(f) => {
+            DeterministicFd::Passthru(f) | DeterministicFd::VirtualRandom(f) => {
                 let regs = proc.get_regs()?;
                 let res = self.passthru.fstat(proc, f)?;
                 if res == 0 {
@@ -489,7 +509,7 @@ impl Linux<DeterministicFd> for Deterministic {
 
     fn newfstatat(&mut self, proc: &CapturedProcess, dirfd: Option<&mut DeterministicFd>, pathname: &str, flags: c_int) -> nix::Result<c_int> {
         let p_dirfd = match dirfd {
-            Some(DeterministicFd::Passthru(f)) => Some(f),
+            Some(DeterministicFd::Passthru(f)) | Some(DeterministicFd::VirtualRandom(f)) => Some(f),
             _ => None,
         };
         let regs = proc.get_regs()?;
@@ -502,7 +522,7 @@ impl Linux<DeterministicFd> for Deterministic {
 
     fn mmap(&mut self, proc: &CapturedProcess, addr: *mut c_void, length: usize, prot: c_int, flags: c_int, fd: Option<&mut DeterministicFd>, offset: off_t) -> nix::Result<*mut c_void> {
         let p_fd = match fd {
-            Some(DeterministicFd::Passthru(f)) => Some(f),
+            Some(DeterministicFd::Passthru(f)) | Some(DeterministicFd::VirtualRandom(f)) => Some(f),
             _ => None,
         };
         self.passthru.mmap(proc, addr, length, prot, flags, p_fd, offset)
@@ -584,7 +604,7 @@ impl Linux<DeterministicFd> for Deterministic {
 
     fn bind(&mut self, proc: &CapturedProcess, fd: &mut DeterministicFd, addr: *const libc::sockaddr, len: libc::socklen_t) -> nix::Result<c_int> {
         match fd {
-            DeterministicFd::Passthru(f) => self.passthru.bind(proc, f, addr, len),
+            DeterministicFd::Passthru(f) | DeterministicFd::VirtualRandom(f) => self.passthru.bind(proc, f, addr, len),
             DeterministicFd::Virtualized(idx) => {
                 let mut sock_addr = unsafe { self.read_sockaddr(proc, addr, len)? };
                 if self.passthru.verbose {
@@ -620,7 +640,7 @@ impl Linux<DeterministicFd> for Deterministic {
 
     fn listen(&mut self, proc: &CapturedProcess, fd: &mut DeterministicFd, backlog: c_int) -> nix::Result<c_int> {
         match fd {
-            DeterministicFd::Passthru(f) => self.passthru.listen(proc, f, backlog),
+            DeterministicFd::Passthru(f) | DeterministicFd::VirtualRandom(f) => self.passthru.listen(proc, f, backlog),
             DeterministicFd::Virtualized(idx) => {
                 if self.passthru.verbose {
                     println!("listen({}, {}) (VIRTUAL)", idx, backlog);
@@ -640,7 +660,7 @@ impl Linux<DeterministicFd> for Deterministic {
 
     fn accept4(&mut self, proc: &CapturedProcess, fd: &mut DeterministicFd, addr: *mut libc::sockaddr, len: *mut libc::socklen_t, _flags: c_int) -> nix::Result<DeterministicFd> {
         match fd {
-            DeterministicFd::Passthru(f) => self.passthru.accept4(proc, f, addr, len, _flags).map(DeterministicFd::Passthru),
+            DeterministicFd::Passthru(f) | DeterministicFd::VirtualRandom(f) => self.passthru.accept4(proc, f, addr, len, _flags).map(DeterministicFd::Passthru),
             DeterministicFd::Virtualized(idx) => {
                 loop {
                     let mut inner = self.network.inner.lock().unwrap();
@@ -686,7 +706,7 @@ impl Linux<DeterministicFd> for Deterministic {
 
     fn connect(&mut self, proc: &CapturedProcess, fd: &mut DeterministicFd, addr: *const libc::sockaddr, len: libc::socklen_t) -> nix::Result<c_int> {
         match fd {
-            DeterministicFd::Passthru(f) => self.passthru.connect(proc, f, addr, len),
+            DeterministicFd::Passthru(f) | DeterministicFd::VirtualRandom(f) => self.passthru.connect(proc, f, addr, len),
             DeterministicFd::Virtualized(idx) => {
                 let dest_addr = unsafe { self.read_sockaddr(proc, addr, len)? };
                 if self.passthru.verbose {
@@ -737,7 +757,7 @@ impl Linux<DeterministicFd> for Deterministic {
 
     fn setsockopt(&mut self, proc: &CapturedProcess, fd: &mut DeterministicFd, level: c_int, optname: c_int, optval: *const c_void, optlen: libc::socklen_t) -> nix::Result<c_int> {
         match fd {
-            DeterministicFd::Passthru(f) => self.passthru.setsockopt(proc, f, level, optname, optval, optlen),
+            DeterministicFd::Passthru(f) | DeterministicFd::VirtualRandom(f) => self.passthru.setsockopt(proc, f, level, optname, optval, optlen),
             DeterministicFd::Virtualized(_) => {
                 // TODO: Implement setsockopt for virtualized sockets
                 Ok(0)
@@ -747,7 +767,7 @@ impl Linux<DeterministicFd> for Deterministic {
 
     fn getsockname(&mut self, proc: &CapturedProcess, fd: &mut DeterministicFd, addr: *mut libc::sockaddr, len: *mut libc::socklen_t) -> nix::Result<c_int> {
         match fd {
-            DeterministicFd::Passthru(f) => self.passthru.getsockname(proc, f, addr, len),
+            DeterministicFd::Passthru(f) | DeterministicFd::VirtualRandom(f) => self.passthru.getsockname(proc, f, addr, len),
             DeterministicFd::Virtualized(idx) => {
                 self.skip_syscall(proc);
                 let inner = self.network.inner.lock().unwrap();
@@ -766,6 +786,11 @@ impl Linux<DeterministicFd> for Deterministic {
         match fd {
             DeterministicFd::Passthru(f) => self.passthru.pread(proc, f, count, offset),
             DeterministicFd::Virtualized(_) => Err(nix::Error::ESPIPE),
+            DeterministicFd::VirtualRandom(_) => {
+                self.skip_syscall(proc);
+                let n = std::cmp::min(count, 65536);
+                Ok(vec![0x42u8; n])
+            }
         }
     }
 
@@ -783,7 +808,7 @@ impl Linux<DeterministicFd> for Deterministic {
             // All passthru, we can delegate but we need to convert PollFd<DeterministicFd> to PollFd<PassthruFd>
             let mut p_fds: Vec<PollFd<PassthruFd>> = fds.iter().map(|f| {
                 match f.fd {
-                    DeterministicFd::Passthru(ref pf) => PollFd { fd: PassthruFd(pf.0), events: f.events, revents: f.revents },
+                    DeterministicFd::Passthru(ref pf) | DeterministicFd::VirtualRandom(ref pf) => PollFd { fd: PassthruFd(pf.0), events: f.events, revents: f.revents },
                     _ => unreachable!(),
                 }
             }).collect();
@@ -818,7 +843,7 @@ impl Linux<DeterministicFd> for Deterministic {
                             ready_count += 1;
                         }
                     }
-                    DeterministicFd::Passthru(_) => {
+                    DeterministicFd::Passthru(_) | DeterministicFd::VirtualRandom(_) => {
                         // For now, ignore passthru FDs when mixed
                     }
                 }
@@ -843,21 +868,21 @@ impl Linux<DeterministicFd> for Deterministic {
 
     fn sendto(&mut self, proc: &CapturedProcess, fd: &mut DeterministicFd, buf: &[u8], flags: c_int, addr: *const libc::sockaddr, len: libc::socklen_t) -> nix::Result<usize> {
         match fd {
-            DeterministicFd::Passthru(f) => self.passthru.sendto(proc, f, buf, flags, addr, len),
+            DeterministicFd::Passthru(f) | DeterministicFd::VirtualRandom(f) => self.passthru.sendto(proc, f, buf, flags, addr, len),
             DeterministicFd::Virtualized(idx) => self.virtual_write(proc, *idx, buf),
         }
     }
 
     fn recvfrom(&mut self, proc: &CapturedProcess, fd: &mut DeterministicFd, count: usize, flags: c_int, addr: *mut libc::sockaddr, len: *mut libc::socklen_t) -> nix::Result<Vec<u8>> {
         match fd {
-            DeterministicFd::Passthru(f) => self.passthru.recvfrom(proc, f, count, flags, addr, len),
+            DeterministicFd::Passthru(f) | DeterministicFd::VirtualRandom(f) => self.passthru.recvfrom(proc, f, count, flags, addr, len),
             DeterministicFd::Virtualized(idx) => self.virtual_read(proc, *idx, count),
         }
     }
 
     fn fcntl(&mut self, proc: &CapturedProcess, fd: &mut DeterministicFd, cmd: c_int, arg: libc::c_ulong) -> nix::Result<c_int> {
         match fd {
-            DeterministicFd::Passthru(f) => self.passthru.fcntl(proc, f, cmd, arg),
+            DeterministicFd::Passthru(f) | DeterministicFd::VirtualRandom(f) => self.passthru.fcntl(proc, f, cmd, arg),
             DeterministicFd::Virtualized(_) => {
                 // TODO: Implement fcntl for virtualized sockets
                 Ok(0)
@@ -867,7 +892,7 @@ impl Linux<DeterministicFd> for Deterministic {
 
     fn lseek(&mut self, proc: &CapturedProcess, fd: &mut DeterministicFd, offset: off_t, whence: c_int) -> nix::Result<off_t> {
         match fd {
-            DeterministicFd::Passthru(f) => self.passthru.lseek(proc, f, offset, whence),
+            DeterministicFd::Passthru(f) | DeterministicFd::VirtualRandom(f) => self.passthru.lseek(proc, f, offset, whence),
             DeterministicFd::Virtualized(_) => Err(nix::Error::ESPIPE),
         }
     }
@@ -878,21 +903,21 @@ impl Linux<DeterministicFd> for Deterministic {
 
     fn pwrite(&mut self, proc: &CapturedProcess, fd: &mut DeterministicFd, buf: &[u8], offset: off_t) -> nix::Result<usize> {
         match fd {
-            DeterministicFd::Passthru(f) => self.passthru.pwrite(proc, f, buf, offset),
+            DeterministicFd::Passthru(f) | DeterministicFd::VirtualRandom(f) => self.passthru.pwrite(proc, f, buf, offset),
             DeterministicFd::Virtualized(_) => Err(nix::Error::ESPIPE),
         }
     }
 
     fn fsync(&mut self, proc: &CapturedProcess, fd: &mut DeterministicFd) -> nix::Result<c_int> {
         match fd {
-            DeterministicFd::Passthru(f) => self.passthru.fsync(proc, f),
+            DeterministicFd::Passthru(f) | DeterministicFd::VirtualRandom(f) => self.passthru.fsync(proc, f),
             DeterministicFd::Virtualized(_) => Ok(0),
         }
     }
 
     fn fdatasync(&mut self, proc: &CapturedProcess, fd: &mut DeterministicFd) -> nix::Result<c_int> {
         match fd {
-            DeterministicFd::Passthru(f) => self.passthru.fdatasync(proc, f),
+            DeterministicFd::Passthru(f) | DeterministicFd::VirtualRandom(f) => self.passthru.fdatasync(proc, f),
             DeterministicFd::Virtualized(_) => Ok(0),
         }
     }
@@ -1084,7 +1109,7 @@ impl Linux<DeterministicFd> for Deterministic {
 
     fn writev(&mut self, proc: &CapturedProcess, fd: &mut DeterministicFd, iov: u64, iovcnt: i32) -> nix::Result<usize> {
         match fd {
-            DeterministicFd::Passthru(f) => self.passthru.writev(proc, f, iov, iovcnt),
+            DeterministicFd::Passthru(f) | DeterministicFd::VirtualRandom(f) => self.passthru.writev(proc, f, iov, iovcnt),
             DeterministicFd::Virtualized(_idx) => {
                 // TODO: Implement writev for virtualized sockets
                 Ok(0)
@@ -1134,6 +1159,10 @@ impl Linux<DeterministicFd> for Deterministic {
 
     fn on_start(&mut self) {
         self.time_manager.register_thread();
+    }
+
+    fn on_exec(&mut self, proc: &CapturedProcess, sp: u64) {
+        crate::vdso::scrub_auxv_random(proc, sp);
     }
 
     fn on_exit(&mut self, _proc: &CapturedProcess) {

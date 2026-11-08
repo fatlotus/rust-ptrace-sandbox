@@ -197,6 +197,9 @@ pub trait Linux<Fd> {
     /// on_start - called when a new child process/thread is actually created
     fn on_start(&mut self) {}
 
+    /// on_exec - called when a tracee stops at initial exec or PTRACE_EVENT_EXEC
+    fn on_exec(&mut self, _proc: &CapturedProcess, _sp: u64) {}
+
     /// on_exit - called when the tracee process/thread exits
     fn on_exit(&mut self, proc: &CapturedProcess);
 

@@ -112,6 +112,7 @@ where
         // Disable vDSO before we start tracing syscalls
         let regs = ptrace::getregs(pid).expect("Failed to get regs for vDSO disable");
         vdso::disable_vdso(pid, regs.rsp);
+        handler.on_exec(&crate::captured::CapturedProcess::new(pid), regs.rsp);
     } else {
         // Thread handover: the parent thread already called detach(SIGSTOP).
         // It might take a moment for the child to stop and be ready for attachment.
@@ -253,6 +254,7 @@ where
                 } else if event == ptrace::Event::PTRACE_EVENT_EXEC as i32 {
                     if let Ok(regs) = ptrace::getregs(pid) {
                         vdso::disable_vdso(pid, regs.rsp);
+                        handler.on_exec(&crate::captured::CapturedProcess::new(pid), regs.rsp);
                     }
                 }
                 let _ = ptrace::syscall(pid, None);

@@ -1,5 +1,6 @@
 use rand::RngCore;
 use std::ffi::CStr;
+use std::io::Read;
 
 fn main() {
     let mut rng = rand::thread_rng();
@@ -7,7 +8,19 @@ fn main() {
     rng.fill_bytes(&mut buf);
     println!("Random bytes: {:?}", buf);
 
+    let mut urand_buf = [0u8; 8];
+    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
+        let _ = f.read_exact(&mut urand_buf);
+    }
+    println!("Urandom: {:?}", urand_buf);
+
     unsafe {
+        let at_rand = libc::getauxval(libc::AT_RANDOM) as *const u8;
+        if !at_rand.is_null() {
+            let slice = std::slice::from_raw_parts(at_rand, 16);
+            println!("AT_RANDOM: {:?}", slice);
+        }
+
         let mut t: libc::time_t = 0;
         let ret_t = libc::syscall(libc::SYS_time, &mut t as *mut libc::time_t);
         println!("Time: {} ({})", ret_t, t);

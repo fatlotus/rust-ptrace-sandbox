@@ -45,6 +45,16 @@ fn do_test_random_gen_deterministic() {
 
     let faults1 = stdout1.lines().find(|l| l.contains("Faults:")).unwrap();
     assert_eq!(faults1, "Faults: getrandom=-1 nanosleep=-1");
+
+    let urand1 = stdout1.lines().find(|l| l.contains("Urandom:")).unwrap();
+    let urand2 = stdout2.lines().find(|l| l.contains("Urandom:")).unwrap();
+    assert_eq!(urand1, urand2);
+    assert_eq!(urand1, "Urandom: [66, 66, 66, 66, 66, 66, 66, 66]");
+
+    let at_rand1 = stdout1.lines().find(|l| l.contains("AT_RANDOM:")).unwrap();
+    let at_rand2 = stdout2.lines().find(|l| l.contains("AT_RANDOM:")).unwrap();
+    assert_eq!(at_rand1, at_rand2);
+    assert_eq!(at_rand1, "AT_RANDOM: [66, 66, 66, 66, 66, 66, 66, 66, 66, 66, 66, 66, 66, 66, 66, 66]");
 }
 
 fn do_test_random_gen_nondeterministic() {
