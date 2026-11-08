@@ -127,11 +127,13 @@ where
                 }
                 Err(e) => {
                     eprintln!("[{}] Failed to attach: {}", pid, e);
+                    handler.on_exit(&crate::captured::CapturedProcess::new(pid));
                     return;
                 }
             }
         }
         if !attached {
+            handler.on_exit(&crate::captured::CapturedProcess::new(pid));
             return;
         }
         
@@ -145,13 +147,17 @@ where
                 }
                 Ok(status) => {
                     if let WaitStatus::Exited(_, _) | WaitStatus::Signaled(_, _, _) = status {
+                        handler.on_exit(&crate::captured::CapturedProcess::new(pid));
                         return;
                     }
                     // For other signals, we might need to pass them through if we were the tracer,
                     // but here we are still trying to become the tracer.
                     let _ = ptrace::syscall(pid, None);
                 }
-                Err(_) => return,
+                Err(_) => {
+                    handler.on_exit(&crate::captured::CapturedProcess::new(pid));
+                    return;
+                }
             }
         }
     }
@@ -162,6 +168,7 @@ where
                   ptrace::Options::PTRACE_O_TRACECLONE |
                   ptrace::Options::PTRACE_O_TRACEEXEC;
     if ptrace::setoptions(pid, options).is_err() {
+        handler.on_exit(&crate::captured::CapturedProcess::new(pid));
         return;
     }
 
@@ -174,6 +181,7 @@ where
     };
 
     if ptrace::syscall(pid, None).is_err() {
+        handler.on_exit(&crate::captured::CapturedProcess::new(pid));
         return;
     }
 
@@ -209,6 +217,7 @@ where
                             break;
                         }
                     }
+                    state.pending_child_handler = None;
                     state.in_syscall = false;
                 }
                 let _ = ptrace::syscall(pid, None);
@@ -228,6 +237,7 @@ where
                     let _ = ptrace::detach(new_pid, Some(nix::sys::signal::Signal::SIGSTOP));
 
                     let mut child_handler = state.pending_child_handler.take().expect("No pending handler for fork");
+                    child_handler.on_start();
                     // After fork, child inherits all file descriptors from parent
                     // Duplicate all parent fds for the child
                     let mut child_fd_map = HashMap::new();

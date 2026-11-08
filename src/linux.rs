@@ -191,6 +191,9 @@ pub trait Linux<Fd> {
     /// set_tid_address - set pointer to thread ID
     fn set_tid_address(&mut self, proc: &CapturedProcess, tidptr: *mut c_int) -> nix::Result<c_int>;
 
+    /// on_start - called when a new child process/thread is actually created
+    fn on_start(&mut self) {}
+
     /// on_exit - called when the tracee process/thread exits
     fn on_exit(&mut self, proc: &CapturedProcess);
 

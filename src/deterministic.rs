@@ -546,19 +546,16 @@ impl Linux<DeterministicFd> for Deterministic {
 
     fn fork(&mut self, proc: &CapturedProcess) -> nix::Result<(nix::unistd::Pid, Box<dyn Linux<DeterministicFd> + Send>)> {
         let (pid, _) = self.passthru.fork(proc)?;
-        self.time_manager.register_thread();
         Ok((pid, Box::new(Deterministic::with_tid(self.passthru.verbose, self.network.clone(), self.time_manager.clone(), None))))
     }
 
     fn vfork(&mut self, proc: &CapturedProcess) -> nix::Result<(nix::unistd::Pid, Box<dyn Linux<DeterministicFd> + Send>)> {
         let (pid, _) = self.passthru.vfork(proc)?;
-        self.time_manager.register_thread();
         Ok((pid, Box::new(Deterministic::with_tid(self.passthru.verbose, self.network.clone(), self.time_manager.clone(), None))))
     }
 
     fn clone(&mut self, proc: &CapturedProcess, flags: c_int, tid_address: Option<*mut c_int>) -> nix::Result<(nix::unistd::Pid, Box<dyn Linux<DeterministicFd> + Send>)> {
         let (pid, _) = self.passthru.clone(proc, flags, tid_address)?;
-        self.time_manager.register_thread();
         Ok((pid, Box::new(Deterministic::with_tid(self.passthru.verbose, self.network.clone(), self.time_manager.clone(), tid_address.map(|a| a as u64)))))
     }
 
@@ -1057,6 +1054,10 @@ impl Linux<DeterministicFd> for Deterministic {
     fn set_tid_address(&mut self, proc: &CapturedProcess, tidptr: *mut c_int) -> nix::Result<c_int> {
         self.tid_address = Some(tidptr as u64);
         self.passthru.set_tid_address(proc, tidptr)
+    }
+
+    fn on_start(&mut self) {
+        self.time_manager.register_thread();
     }
 
     fn on_exit(&mut self, _proc: &CapturedProcess) {
