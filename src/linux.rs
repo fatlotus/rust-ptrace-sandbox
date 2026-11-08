@@ -161,6 +161,9 @@ pub trait Linux<Fd> {
     /// gettimeofday - get time
     fn gettimeofday(&mut self, proc: &CapturedProcess) -> nix::Result<c_int>;
 
+    /// time - get time in seconds
+    fn time(&mut self, proc: &CapturedProcess, tloc: *mut libc::time_t) -> nix::Result<libc::time_t>;
+
     /// getppid - get parent process identification
     fn getppid(&mut self, proc: &CapturedProcess) -> nix::Result<c_int>;
 

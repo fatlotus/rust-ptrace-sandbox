@@ -312,6 +312,10 @@ impl CapturedProcess {
         self.syscall(libc::SYS_gettimeofday as u64, tv_addr, tz_addr, 0, 0, 0, 0)
     }
 
+    pub fn time(&self, tloc_addr: u64) -> Result<i64> {
+        self.syscall(libc::SYS_time as u64, tloc_addr, 0, 0, 0, 0, 0)
+    }
+
     pub fn getppid(&self) -> Result<i64> {
         self.syscall(libc::SYS_getppid as u64, 0, 0, 0, 0, 0, 0)
     }

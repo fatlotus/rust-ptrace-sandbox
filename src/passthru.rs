@@ -398,6 +398,14 @@ impl Linux<PassthruFd> for Passthru {
         Ok(res as c_int)
     }
 
+    fn time(&mut self, proc: &CapturedProcess, tloc: *mut libc::time_t) -> nix::Result<libc::time_t> {
+        let res = proc.time(tloc as u64)?;
+        if self.verbose {
+            println!("time({:?}) = {}", tloc, res);
+        }
+        Ok(res as libc::time_t)
+    }
+
     fn getppid(&mut self, proc: &CapturedProcess) -> nix::Result<c_int> {
         let res = proc.getppid()?;
         if self.verbose {

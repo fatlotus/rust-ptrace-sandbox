@@ -787,6 +787,13 @@ where
                 Err(err) => Some(-(err as i32) as i64),
             }
         }
+        Some(Sysno::time) => {
+            let tloc = regs.rdi as *mut libc::time_t;
+            match handler.time(&proc, tloc) {
+                Ok(res) => Some(res as i64),
+                Err(err) => Some(-(err as i32) as i64),
+            }
+        }
         Some(Sysno::uname) => {
             match handler.uname(&proc) {
                 Ok(res) => Some(res as i64),

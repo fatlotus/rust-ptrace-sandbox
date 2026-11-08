@@ -527,6 +527,10 @@ impl Linux<DeterministicFd> for Deterministic {
     fn clock_gettime(&mut self, proc: &CapturedProcess, clk_id: libc::clockid_t) -> nix::Result<c_int> {
         let regs = proc.get_regs()?;
         let tp_addr = regs.rsi as usize;
+        self.skip_syscall(proc);
+        if tp_addr == 0 {
+            return Err(nix::Error::EFAULT);
+        }
         
         let current_time = self.time_manager.get_time();
         let tv_sec: i64 = current_time.as_secs() as i64;
@@ -935,22 +939,40 @@ impl Linux<DeterministicFd> for Deterministic {
     fn gettimeofday(&mut self, proc: &CapturedProcess) -> nix::Result<c_int> {
         let regs = proc.get_regs()?;
         let tv_addr = regs.rdi as usize;
+        let tz_addr = regs.rsi as usize;
+        self.skip_syscall(proc);
         
-        let current_time = self.time_manager.get_time();
-        let tv_sec: i64 = current_time.as_secs() as i64;
-        let tv_usec: i64 = current_time.subsec_micros() as i64;
-        
-        let mut bytes = Vec::with_capacity(16);
-        bytes.extend_from_slice(&tv_sec.to_ne_bytes());
-        bytes.extend_from_slice(&tv_usec.to_ne_bytes());
-        
-        proc.write_memory(tv_addr, &bytes);
+        if tv_addr != 0 {
+            let current_time = self.time_manager.get_time();
+            let tv_sec: i64 = current_time.as_secs() as i64;
+            let tv_usec: i64 = current_time.subsec_micros() as i64;
+            
+            let mut bytes = Vec::with_capacity(16);
+            bytes.extend_from_slice(&tv_sec.to_ne_bytes());
+            bytes.extend_from_slice(&tv_usec.to_ne_bytes());
+            
+            proc.write_memory(tv_addr, &bytes);
+        }
+        if tz_addr != 0 {
+            proc.write_memory(tz_addr, &[0u8; 8]);
+        }
         
         if self.passthru.verbose {
             println!("gettimeofday(..., ...) = 0 (DETERMINISTIC)");
         }
-        self.skip_syscall(proc);
         Ok(0)
+    }
+
+    fn time(&mut self, proc: &CapturedProcess, tloc: *mut libc::time_t) -> nix::Result<libc::time_t> {
+        self.skip_syscall(proc);
+        let secs = self.time_manager.get_time().as_secs() as libc::time_t;
+        if !tloc.is_null() {
+            proc.write_memory(tloc as usize, &secs.to_ne_bytes());
+        }
+        if self.passthru.verbose {
+            println!("time({:?}) = {} (DETERMINISTIC)", tloc, secs);
+        }
+        Ok(secs)
     }
 
     fn getppid(&mut self, proc: &CapturedProcess) -> nix::Result<c_int> {
@@ -970,11 +992,65 @@ impl Linux<DeterministicFd> for Deterministic {
     }
 
     fn uname(&mut self, proc: &CapturedProcess) -> nix::Result<c_int> {
-        self.passthru.uname(proc)
+        let regs = proc.get_regs()?;
+        let addr = regs.rdi as usize;
+        self.skip_syscall(proc);
+        if addr == 0 {
+            return Err(nix::Error::EFAULT);
+        }
+        let mut uts: libc::utsname = unsafe { std::mem::zeroed() };
+        fn copy_cstr(dst: &mut [libc::c_char], src: &[u8]) {
+            for (i, &b) in src.iter().enumerate() {
+                if i + 1 < dst.len() {
+                    dst[i] = b as libc::c_char;
+                }
+            }
+        }
+        copy_cstr(&mut uts.sysname, b"Linux");
+        copy_cstr(&mut uts.nodename, b"sandbox");
+        copy_cstr(&mut uts.release, b"6.0.0-deterministic");
+        copy_cstr(&mut uts.version, b"#1 SMP DETERMINISTIC");
+        copy_cstr(&mut uts.machine, b"x86_64");
+
+        let bytes = unsafe {
+            std::slice::from_raw_parts(
+                &uts as *const libc::utsname as *const u8,
+                std::mem::size_of::<libc::utsname>(),
+            )
+        };
+        proc.write_memory(addr, bytes);
+        if self.passthru.verbose {
+            println!("uname(...) = 0 (DETERMINISTIC)");
+        }
+        Ok(0)
     }
 
     fn sysinfo(&mut self, proc: &CapturedProcess) -> nix::Result<c_int> {
-        self.passthru.sysinfo(proc)
+        let regs = proc.get_regs()?;
+        let addr = regs.rdi as usize;
+        self.skip_syscall(proc);
+        if addr == 0 {
+            return Err(nix::Error::EFAULT);
+        }
+        let mut info: libc::sysinfo = unsafe { std::mem::zeroed() };
+        let current_time = self.time_manager.get_time();
+        info.uptime = current_time.as_secs().saturating_sub(946684800) as i64;
+        info.totalram = 1024 * 1024 * 1024;
+        info.freeram = 512 * 1024 * 1024;
+        info.procs = 1;
+        info.mem_unit = 1;
+
+        let bytes = unsafe {
+            std::slice::from_raw_parts(
+                &info as *const libc::sysinfo as *const u8,
+                std::mem::size_of::<libc::sysinfo>(),
+            )
+        };
+        proc.write_memory(addr, bytes);
+        if self.passthru.verbose {
+            println!("sysinfo(...) = 0 (DETERMINISTIC)");
+        }
+        Ok(0)
     }
 
     fn getgid(&mut self, proc: &CapturedProcess) -> nix::Result<c_int> {

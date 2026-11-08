@@ -27,8 +27,21 @@ fn do_test_random_gen_deterministic() {
     
     let line1 = stdout1.lines().find(|l| l.contains("Random bytes:")).unwrap();
     let line2 = stdout2.lines().find(|l| l.contains("Random bytes:")).unwrap();
-    
     assert_eq!(line1, line2);
+
+    let time1 = stdout1.lines().find(|l| l.contains("Time:")).unwrap();
+    let time2 = stdout2.lines().find(|l| l.contains("Time:")).unwrap();
+    assert_eq!(time1, time2);
+    assert!(time1.contains("946684800"));
+
+    let sys1 = stdout1.lines().find(|l| l.contains("Sysinfo:")).unwrap();
+    let sys2 = stdout2.lines().find(|l| l.contains("Sysinfo:")).unwrap();
+    assert_eq!(sys1, sys2);
+
+    let uname1 = stdout1.lines().find(|l| l.contains("Uname:")).unwrap();
+    let uname2 = stdout2.lines().find(|l| l.contains("Uname:")).unwrap();
+    assert_eq!(uname1, uname2);
+    assert!(uname1.contains("nodename=sandbox"));
 }
 
 fn do_test_random_gen_nondeterministic() {
