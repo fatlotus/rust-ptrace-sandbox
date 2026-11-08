@@ -65,6 +65,11 @@ fn do_test_random_gen_deterministic() {
     let statx2 = stdout2.lines().find(|l| l.contains("Statx:")).unwrap();
     assert_eq!(statx1, statx2);
     assert!(statx1.ends_with("mtime=0"));
+
+    let tid1 = stdout1.lines().find(|l| l.contains("Tid:")).unwrap();
+    let tid2 = stdout2.lines().find(|l| l.contains("Tid:")).unwrap();
+    assert_eq!(tid1, tid2);
+    assert_eq!(tid1, "Tid: 1234");
 }
 
 fn do_test_random_gen_nondeterministic() {

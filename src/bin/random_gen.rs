@@ -45,6 +45,9 @@ fn main() {
         if libc::syscall(libc::SYS_stat, b"/etc/hosts\0".as_ptr(), &mut st as *mut libc::stat) == 0 {
             println!("Stat: ino={} mtime={}", st.st_ino, st.st_mtime);
         }
+
+        let tid = libc::syscall(libc::SYS_gettid);
+        println!("Tid: {}", tid);
     }
 
     if let Ok(meta) = std::fs::metadata("/etc/hosts") {

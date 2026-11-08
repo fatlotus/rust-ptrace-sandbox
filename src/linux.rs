@@ -157,6 +157,9 @@ pub trait Linux<Fd> {
     /// getpid - get process identification
     fn getpid(&mut self, proc: &CapturedProcess) -> nix::Result<c_int>;
 
+    /// gettid - get thread identification
+    fn gettid(&mut self, proc: &CapturedProcess) -> nix::Result<c_int>;
+
     /// getuid - get user identification
     fn getuid(&mut self, proc: &CapturedProcess) -> nix::Result<c_int>;
 

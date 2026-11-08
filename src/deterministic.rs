@@ -93,6 +93,8 @@ struct TimeInner {
     futex_waiters: HashMap<u64, Vec<usize>>,
     ino_map: HashMap<u64, u64>,
     next_ino: u64,
+    tid_map: HashMap<c_int, c_int>,
+    next_tid: c_int,
 }
 
 pub struct TimeManager {
@@ -113,8 +115,22 @@ impl TimeManager {
                 futex_waiters: HashMap::new(),
                 ino_map: HashMap::new(),
                 next_ino: 1,
+                tid_map: HashMap::new(),
+                next_tid: 1234,
             }),
             condvar: Condvar::new(),
+        }
+    }
+
+    pub fn get_deterministic_tid(&self, real_tid: c_int) -> c_int {
+        let mut inner = self.inner.lock().unwrap();
+        if let Some(&det_tid) = inner.tid_map.get(&real_tid) {
+            det_tid
+        } else {
+            let det_tid = inner.next_tid;
+            inner.next_tid += 1;
+            inner.tid_map.insert(real_tid, det_tid);
+            det_tid
         }
     }
 
@@ -1030,6 +1046,15 @@ impl Linux<DeterministicFd> for Deterministic {
         Ok(1234)
     }
 
+    fn gettid(&mut self, proc: &CapturedProcess) -> nix::Result<c_int> {
+        let tid = self.time_manager.get_deterministic_tid(proc.pid.as_raw());
+        if self.passthru.verbose {
+            println!("gettid() = {} (DETERMINISTIC)", tid);
+        }
+        self.skip_syscall(proc);
+        Ok(tid)
+    }
+
     fn getuid(&mut self, proc: &CapturedProcess) -> nix::Result<c_int> {
         if self.passthru.verbose {
             println!("getuid() = 1000 (DETERMINISTIC)");
@@ -1250,7 +1275,9 @@ impl Linux<DeterministicFd> for Deterministic {
 
     fn set_tid_address(&mut self, proc: &CapturedProcess, tidptr: *mut c_int) -> nix::Result<c_int> {
         self.tid_address = Some(tidptr as u64);
-        self.passthru.set_tid_address(proc, tidptr)
+        let _ = self.passthru.set_tid_address(proc, tidptr)?;
+        let tid = self.time_manager.get_deterministic_tid(proc.pid.as_raw());
+        Ok(tid)
     }
 
     fn on_start(&mut self) {

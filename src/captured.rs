@@ -5,7 +5,7 @@ use libc::{c_int, c_void, mode_t, off_t};
 use nix::Result;
 
 pub struct CapturedProcess {
-    pid: Pid,
+    pub pid: Pid,
 }
 
 impl CapturedProcess {
@@ -303,6 +303,10 @@ impl CapturedProcess {
 
     pub fn getpid(&self) -> Result<i64> {
         self.syscall(libc::SYS_getpid as u64, 0, 0, 0, 0, 0, 0)
+    }
+
+    pub fn gettid(&self) -> Result<i64> {
+        self.syscall(libc::SYS_gettid as u64, 0, 0, 0, 0, 0, 0)
     }
 
     pub fn getuid(&self) -> Result<i64> {

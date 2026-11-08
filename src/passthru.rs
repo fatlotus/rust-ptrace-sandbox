@@ -390,6 +390,14 @@ impl Linux<PassthruFd> for Passthru {
         Ok(res as c_int)
     }
 
+    fn gettid(&mut self, proc: &CapturedProcess) -> nix::Result<c_int> {
+        let res = proc.gettid()?;
+        if self.verbose {
+            println!("gettid() = {}", res);
+        }
+        Ok(res as c_int)
+    }
+
     fn getuid(&mut self, proc: &CapturedProcess) -> nix::Result<c_int> {
         let res = proc.getuid()?;
         if self.verbose {

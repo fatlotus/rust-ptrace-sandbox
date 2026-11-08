@@ -775,6 +775,12 @@ where
                 Err(err) => Some(-(err as i32) as i64),
             }
         }
+        Some(Sysno::gettid) => {
+            match handler.gettid(&proc) {
+                Ok(res) => Some(res as i64),
+                Err(err) => Some(-(err as i32) as i64),
+            }
+        }
         Some(Sysno::getuid) => {
             match handler.getuid(&proc) {
                 Ok(res) => Some(res as i64),
