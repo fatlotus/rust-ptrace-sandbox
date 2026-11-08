@@ -373,6 +373,22 @@ pub trait Linux<Fd> {
         Ok(res as usize)
     }
 
+    /// epoll_ctl - control interface for an epoll file descriptor
+    fn epoll_ctl(&mut self, proc: &CapturedProcess, epfd: c_int, op: c_int, fd: c_int, target: Option<&Fd>, event_addr: u64) -> nix::Result<c_int>
+    where
+        Fd: std::os::unix::io::AsRawFd,
+    {
+        let actual_fd = target.map(|t| t.as_raw_fd()).unwrap_or(fd);
+        let res = proc.syscall(libc::SYS_epoll_ctl as u64, epfd as u64, op as u64, actual_fd as u64, event_addr, 0, 0)?;
+        Ok(res as c_int)
+    }
+
+    /// epoll_wait / epoll_pwait - wait for an I/O event on an epoll file descriptor
+    fn epoll_wait(&mut self, proc: &CapturedProcess, epfd: c_int, events_addr: u64, maxevents: c_int, timeout_ms: c_int) -> nix::Result<c_int> {
+        let res = proc.syscall(libc::SYS_epoll_wait as u64, epfd as u64, events_addr, maxevents as u64, timeout_ms as i64 as u64, 0, 0)?;
+        Ok(res as c_int)
+    }
+
     /// is_verbose - check if verbose logging is enabled
     fn is_verbose(&self) -> bool;
 
@@ -386,6 +402,7 @@ pub trait Linux<Fd> {
         false
     }
 }
+
 
 #[derive(Debug, Clone, Copy, Default)]
 #[repr(C)]

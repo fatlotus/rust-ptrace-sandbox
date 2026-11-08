@@ -3,10 +3,13 @@ use crate::captured::CapturedProcess;
 use crate::passthru::{Passthru, PassthruFd};
 use libc::{c_int, c_void, mode_t, off_t};
 use std::sync::{Arc, Mutex, Condvar};
-use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::collections::{BTreeMap, BinaryHeap, HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;
 use std::time::Duration;
 use std::cmp::Ordering;
+use rand::rngs::StdRng;
+use rand::{Rng, RngCore, SeedableRng};
+use rand::seq::SliceRandom;
 
 const DETERMINISTIC_UUID: &[u8] = b"42424242-4242-4242-4242-424242424242\n";
 
@@ -46,20 +49,60 @@ struct VirtualSocket {
     backlog: Vec<usize>, // Indices of pending client sockets
     peer: Option<usize>, // Index of peer socket if connected
     read_buf: Vec<u8>,
+    in_flight: VecDeque<(Duration, Vec<u8>)>,
+    read_epoch: u64,
     closed: bool,
     open_count: usize,
     nonblocking: bool,
+}
+
+impl VirtualSocket {
+    fn deliver_due(&mut self, now: Duration) {
+        let mut delivered = false;
+        while let Some((delivery_time, _)) = self.in_flight.front() {
+            if *delivery_time <= now {
+                let (_, data) = self.in_flight.pop_front().unwrap();
+                self.read_buf.extend_from_slice(&data);
+                delivered = true;
+            } else {
+                break;
+            }
+        }
+        if delivered {
+            self.read_epoch = self.read_epoch.wrapping_add(1);
+        }
+    }
+
+    fn is_closed(&self) -> bool {
+        self.closed && self.in_flight.is_empty()
+    }
+}
+
+#[derive(Clone, Copy)]
+enum EpollTarget {
+    VirtualSocket(usize),
+    Passthru(c_int),
+}
+
+struct EpollEntry {
+    target: EpollTarget,
+    events: u32,
+    data: u64,
+    last_read_epoch: u64,
+    write_notified: bool,
+    hup_notified: bool,
 }
 
 struct NetworkInner {
     sockets: Vec<Arc<Mutex<VirtualSocket>>>,
     listeners: HashMap<SocketAddr, usize>,
     next_port: u16,
+    epoll_tables: BTreeMap<c_int, BTreeMap<c_int, EpollEntry>>,
+    passthru_readable: HashSet<c_int>,
 }
 
 pub struct Network {
     inner: Mutex<NetworkInner>,
-    condvar: Condvar,
 }
 
 impl Network {
@@ -69,8 +112,9 @@ impl Network {
                 sockets: Vec::new(),
                 listeners: HashMap::new(),
                 next_port: 1024,
+                epoll_tables: BTreeMap::new(),
+                passthru_readable: HashSet::new(),
             }),
-            condvar: Condvar::new(),
         }
     }
 }
@@ -78,13 +122,17 @@ impl Network {
 #[derive(Debug, PartialEq, Eq)]
 struct TimerEvent {
     target_time: Duration,
+    is_background_sleep: bool,
     waiter_id: usize,
 }
 
 impl Ord for TimerEvent {
     fn cmp(&self, other: &Self) -> Ordering {
-        // Min-heap: smaller target_time has higher priority
-        other.target_time.cmp(&self.target_time)
+        // Min-heap: smaller target_time has higher priority; foreground timers before background nanosleep
+        other
+            .target_time
+            .cmp(&self.target_time)
+            .then_with(|| other.is_background_sleep.cmp(&self.is_background_sleep))
             .then_with(|| other.waiter_id.cmp(&self.waiter_id))
     }
 }
@@ -117,6 +165,8 @@ struct TimeInner {
     next_waiter_id: usize,
     timers: BinaryHeap<TimerEvent>,
     waiters: HashMap<usize, WaiterStatus>,
+    io_waiters: HashSet<usize>,
+    io_epoch: u64,
     futex_waiters: HashMap<(u64, u64), Vec<FutexWaiter>>,
     ino_map: HashMap<u64, u64>,
     next_ino: u64,
@@ -124,6 +174,9 @@ struct TimeInner {
     rev_tid_map: HashMap<c_int, c_int>,
     next_tid: c_int,
     next_aspace_id: u64,
+    rng: Option<StdRng>,
+    net_rng: Option<StdRng>,
+    jitter_ns: u64,
 }
 
 fn is_tid_kernel_sleeping(tid: c_int) -> bool {
@@ -153,6 +206,23 @@ pub struct TimeManager {
 
 impl TimeManager {
     pub fn new() -> Self {
+        Self::with_seed_and_jitter(None, 0)
+    }
+
+    pub fn with_seed_and_jitter(seed: Option<u64>, jitter_ns: u64) -> Self {
+        let (rng, net_rng) = if let Some(s) = seed {
+            (
+                Some(StdRng::seed_from_u64(s)),
+                Some(StdRng::seed_from_u64(s ^ 0x9e37_79b9_7f4a_7c15)),
+            )
+        } else if jitter_ns > 0 {
+            (
+                Some(StdRng::seed_from_u64(0)),
+                Some(StdRng::seed_from_u64(0x9e37_79b9_7f4a_7c15)),
+            )
+        } else {
+            (None, None)
+        };
         Self {
             inner: Mutex::new(TimeInner {
                 current_time: Duration::from_secs(946684800), // 2000-01-01 00:00:00 UTC
@@ -163,6 +233,8 @@ impl TimeManager {
                 next_waiter_id: 0,
                 timers: BinaryHeap::new(),
                 waiters: HashMap::new(),
+                io_waiters: HashSet::new(),
+                io_epoch: 0,
                 futex_waiters: HashMap::new(),
                 ino_map: HashMap::new(),
                 next_ino: 1,
@@ -170,9 +242,155 @@ impl TimeManager {
                 rev_tid_map: HashMap::new(),
                 next_tid: 1234,
                 next_aspace_id: 2,
+                rng,
+                net_rng,
+                jitter_ns,
             }),
             condvar: Condvar::new(),
         }
+    }
+
+    pub fn fill_random_bytes(&self, buf: &mut [u8]) {
+        let mut inner = self.inner.lock().unwrap();
+        if let Some(ref mut rng) = inner.rng {
+            rng.fill_bytes(buf);
+        } else {
+            buf.fill(0x42);
+        }
+    }
+
+    pub fn sample_network_jitter(&self) -> Duration {
+        let mut inner = self.inner.lock().unwrap();
+        let jitter_ns = inner.jitter_ns;
+        if jitter_ns > 0 {
+            if let Some(ref mut rng) = inner.net_rng {
+                return Duration::from_nanos(rng.gen_range(1..=jitter_ns));
+            }
+        }
+        Duration::ZERO
+    }
+
+    pub fn maybe_shuffle_epoll<T>(&self, events: &mut [T]) {
+        if events.len() <= 1 {
+            return;
+        }
+        let mut inner = self.inner.lock().unwrap();
+        if inner.jitter_ns > 0 {
+            if let Some(ref mut rng) = inner.net_rng {
+                events.shuffle(rng);
+            }
+        }
+    }
+
+    fn wake_io_waiters_locked(inner: &mut TimeInner) -> bool {
+        inner.io_epoch = inner.io_epoch.wrapping_add(1);
+        let TimeInner {
+            ref mut io_waiters,
+            ref mut waiters,
+            ref mut blocked_threads,
+            ..
+        } = *inner;
+        let mut woken = false;
+        for wid in io_waiters.drain() {
+            if let Some(status) = waiters.get_mut(&wid) {
+                if *status == WaiterStatus::Waiting {
+                    *status = WaiterStatus::Woken;
+                    if *blocked_threads > 0 {
+                        *blocked_threads -= 1;
+                    }
+                    woken = true;
+                }
+            }
+        }
+        woken
+    }
+
+    pub fn notify_io(&self) {
+        let mut inner = self.inner.lock().unwrap();
+        if Self::wake_io_waiters_locked(&mut inner) {
+            self.condvar.notify_all();
+        }
+    }
+
+    pub fn schedule_wakeup(&self, target_time: Duration) {
+        let mut inner = self.inner.lock().unwrap();
+        if target_time <= inner.current_time {
+            if Self::wake_io_waiters_locked(&mut inner) {
+                self.condvar.notify_all();
+            }
+            return;
+        }
+        inner.timers.push(TimerEvent {
+            target_time,
+            is_background_sleep: false,
+            waiter_id: usize::MAX,
+        });
+        Self::maybe_advance_clock_locked(&mut inner, &self.condvar);
+    }
+
+    pub fn get_time_and_io_epoch(&self) -> (Duration, u64) {
+        let inner = self.inner.lock().unwrap();
+        (inner.current_time, inner.io_epoch)
+    }
+
+    pub fn wait_for_io(
+        &self,
+        proc: &CapturedProcess,
+        observed_epoch: u64,
+        deadline: Option<Duration>,
+    ) -> nix::Result<()> {
+        let mut inner = self.inner.lock().unwrap();
+        if inner.io_epoch != observed_epoch {
+            return Ok(());
+        }
+        if let Some(dl) = deadline {
+            if inner.current_time >= dl {
+                return Ok(());
+            }
+        }
+
+        let waiter_id = inner.next_waiter_id;
+        inner.next_waiter_id += 1;
+        inner.waiters.insert(waiter_id, WaiterStatus::Waiting);
+        inner.io_waiters.insert(waiter_id);
+        inner.blocked_threads += 1;
+
+        if let Some(dl) = deadline {
+            inner.timers.push(TimerEvent {
+                target_time: dl,
+                is_background_sleep: false,
+                waiter_id,
+            });
+        }
+
+        Self::maybe_advance_clock_locked(&mut inner, &self.condvar);
+
+        while inner.waiters.get(&waiter_id) == Some(&WaiterStatus::Waiting) {
+            if !proc.is_alive() {
+                inner.io_waiters.remove(&waiter_id);
+                self.cleanup_waiter(&mut inner, waiter_id);
+                return Err(nix::Error::ESRCH);
+            }
+
+            let (new_inner, timeout_res) = self
+                .condvar
+                .wait_timeout(inner, Duration::from_millis(5))
+                .unwrap();
+            inner = new_inner;
+
+            if timeout_res.timed_out() {
+                if !proc.is_alive() {
+                    inner.io_waiters.remove(&waiter_id);
+                    self.cleanup_waiter(&mut inner, waiter_id);
+                    return Err(nix::Error::ESRCH);
+                }
+                Self::maybe_advance_clock_locked(&mut inner, &self.condvar);
+            }
+        }
+
+        inner.io_waiters.remove(&waiter_id);
+        self.cleanup_waiter(&mut inner, waiter_id);
+        Ok(())
     }
 
     pub fn allocate_aspace_id(&self) -> u64 {
@@ -249,10 +467,18 @@ impl TimeManager {
             }
             while let Some(earliest) = inner.timers.peek() {
                 if earliest.target_time <= inner.current_time {
+                    // Do not wake background nanosleep (e.g. Go sysmon) at the exact same
+                    // instant as a foreground thread that has already been woken.
+                    if earliest.is_background_sleep && !Self::all_threads_blocked(inner) {
+                        break;
+                    }
                     let timer = inner.timers.pop().unwrap();
-                    if let Some(status) = inner.waiters.get_mut(&timer.waiter_id) {
+                    if timer.waiter_id == usize::MAX {
+                        Self::wake_io_waiters_locked(inner);
+                    } else if let Some(status) = inner.waiters.get_mut(&timer.waiter_id) {
                         if *status == WaiterStatus::Waiting {
                             *status = WaiterStatus::TimerExpired;
+                            inner.io_waiters.remove(&timer.waiter_id);
                             if inner.blocked_threads > 0 {
                                 inner.blocked_threads -= 1;
                             }
@@ -287,19 +513,6 @@ impl TimeManager {
         inner.active_tids.insert(real_tid);
     }
 
-    pub fn enter_blocking(&self) {
-        let mut inner = self.inner.lock().unwrap();
-        inner.blocked_threads += 1;
-        Self::maybe_advance_clock_locked(&mut inner, &self.condvar);
-    }
-
-    pub fn exit_blocking(&self) {
-        let mut inner = self.inner.lock().unwrap();
-        if inner.blocked_threads > 0 {
-            inner.blocked_threads -= 1;
-        }
-    }
-
     fn wait_for_timer_locked<'a>(
         &'a self,
         mut inner: std::sync::MutexGuard<'a, TimeInner>,
@@ -315,6 +528,7 @@ impl TimeManager {
 
         inner.timers.push(TimerEvent {
             target_time,
+            is_background_sleep: true,
             waiter_id,
         });
         inner.waiters.insert(waiter_id, WaiterStatus::Waiting);
@@ -422,6 +636,7 @@ impl TimeManager {
             };
             inner.timers.push(TimerEvent {
                 target_time,
+                is_background_sleep: false,
                 waiter_id,
             });
         }
@@ -561,10 +776,14 @@ pub struct Deterministic {
 
 impl Deterministic {
     pub fn new(verbose: bool) -> Self {
+        Self::with_seed_and_jitter(verbose, None, 0)
+    }
+
+    pub fn with_seed_and_jitter(verbose: bool, seed: Option<u64>, jitter_ns: u64) -> Self {
         Self {
             passthru: Passthru::new(verbose),
             network: Arc::new(Network::new()),
-            time_manager: Arc::new(TimeManager::new()),
+            time_manager: Arc::new(TimeManager::with_seed_and_jitter(seed, jitter_ns)),
             tid_address: None,
             aspace_id: 1,
         }
@@ -758,7 +977,13 @@ impl Linux<DeterministicFd> for Deterministic {
     fn write(&mut self, proc: &CapturedProcess, fd: &mut DeterministicFd, buf: &[u8]) -> nix::Result<usize> {
         match fd {
             DeterministicFd::Passthru(f) | DeterministicFd::VirtualRandom(f) | DeterministicFd::VirtualUuid(f, _) => {
-                self.passthru.write(proc, f, buf)
+                let raw = f.0;
+                let res = self.passthru.write(proc, f, buf);
+                if res.is_ok() && raw > 2 {
+                    self.network.inner.lock().unwrap().passthru_readable.insert(raw);
+                    self.time_manager.notify_io();
+                }
+                res
             }
             DeterministicFd::Virtualized(_, idx) => self.virtual_write(proc, *idx, buf),
         }
@@ -766,7 +991,15 @@ impl Linux<DeterministicFd> for Deterministic {
 
     fn read(&mut self, proc: &CapturedProcess, fd: &mut DeterministicFd, count: usize) -> nix::Result<Vec<u8>> {
         match fd {
-            DeterministicFd::Passthru(f) => self.passthru.read(proc, f, count),
+            DeterministicFd::Passthru(f) => {
+                let raw = f.0;
+                let res = self.passthru.read(proc, f, count);
+                if raw > 2 {
+                    let mut inner = self.network.inner.lock().unwrap();
+                    inner.passthru_readable.remove(&raw);
+                }
+                res
+            }
             DeterministicFd::Virtualized(_, idx) => self.virtual_read(proc, *idx, count, 0),
             DeterministicFd::VirtualRandom(_) => {
                 self.skip_syscall(proc);
@@ -774,7 +1007,9 @@ impl Linux<DeterministicFd> for Deterministic {
                 if self.passthru.verbose {
                     println!("read(urandom, ..., {}) = {} (DETERMINISTIC)", count, n);
                 }
-                Ok(vec![0x42u8; n])
+                let mut buf = vec![0u8; n];
+                self.time_manager.fill_random_bytes(&mut buf);
+                Ok(buf)
             }
             DeterministicFd::VirtualUuid(_, off) => {
                 self.skip_syscall(proc);
@@ -803,6 +1038,15 @@ impl Linux<DeterministicFd> for Deterministic {
     fn close(&mut self, proc: &CapturedProcess, fd: DeterministicFd) -> nix::Result<c_int> {
         match fd {
             DeterministicFd::Passthru(f) | DeterministicFd::VirtualRandom(f) | DeterministicFd::VirtualUuid(f, _) => {
+                let raw = f.0;
+                {
+                    let mut inner = self.network.inner.lock().unwrap();
+                    inner.epoll_tables.remove(&raw);
+                    for table in inner.epoll_tables.values_mut() {
+                        table.remove(&raw);
+                    }
+                    inner.passthru_readable.remove(&raw);
+                }
                 self.passthru.close(proc, f)
             }
             DeterministicFd::Virtualized(raw_fd, idx) => self.virtual_close(proc, raw_fd, idx),
@@ -1000,6 +1244,8 @@ impl Linux<DeterministicFd> for Deterministic {
             backlog: Vec::new(),
             peer: None,
             read_buf: Vec::new(),
+            in_flight: VecDeque::new(),
+            read_epoch: 1,
             closed: false,
             open_count: 1,
             nonblocking,
@@ -1077,8 +1323,9 @@ impl Linux<DeterministicFd> for Deterministic {
             }
             DeterministicFd::Virtualized(_, idx) => {
                 loop {
-                    let mut inner = self.network.inner.lock().unwrap();
+                    let (_now, io_epoch) = self.time_manager.get_time_and_io_epoch();
                     let (res, is_nonblocking) = {
+                        let inner = self.network.inner.lock().unwrap();
                         let mut sock = inner.sockets[*idx].lock().unwrap();
                         if !sock.backlog.is_empty() {
                             let c_idx = sock.backlog.remove(0);
@@ -1096,7 +1343,6 @@ impl Linux<DeterministicFd> for Deterministic {
                     };
 
                     if let Some((client_idx, client_addr)) = res {
-                        drop(inner);
                         let mut efd_flags = 0;
                         if (flags & libc::SOCK_CLOEXEC) != 0 {
                             efd_flags |= libc::EFD_CLOEXEC;
@@ -1118,23 +1364,11 @@ impl Linux<DeterministicFd> for Deterministic {
                     }
 
                     if is_nonblocking {
-                        drop(inner);
                         self.skip_syscall(proc);
                         return Err(nix::Error::EAGAIN);
                     }
 
-                    if !proc.is_alive() {
-                        return Err(nix::Error::ESRCH);
-                    }
-
-                    // Wait for data with timeout
-                    self.time_manager.enter_blocking();
-                    let (new_inner, timeout_res) = self.network.condvar.wait_timeout(inner, std::time::Duration::from_millis(100)).unwrap();
-                    self.time_manager.exit_blocking();
-                    inner = new_inner;
-                    if timeout_res.timed_out() && !proc.is_alive() {
-                        return Err(nix::Error::ESRCH);
-                    }
+                    self.time_manager.wait_for_io(proc, io_epoch, None)?;
                 }
             }
         }
@@ -1184,6 +1418,8 @@ impl Linux<DeterministicFd> for Deterministic {
                     backlog: Vec::new(),
                     peer: Some(*idx),
                     read_buf: Vec::new(),
+                    in_flight: VecDeque::new(),
+                    read_epoch: 1,
                     closed: false,
                     open_count: 1,
                     nonblocking: false,
@@ -1200,9 +1436,11 @@ impl Linux<DeterministicFd> for Deterministic {
                 {
                     let mut server_sock = inner.sockets[server_idx].lock().unwrap();
                     server_sock.backlog.push(peer_idx);
+                    server_sock.read_epoch = server_sock.read_epoch.wrapping_add(1);
                 }
+                drop(inner);
 
-                self.network.condvar.notify_all();
+                self.time_manager.notify_io();
                 Ok(0)
             }
         }
@@ -1246,7 +1484,9 @@ impl Linux<DeterministicFd> for Deterministic {
             DeterministicFd::VirtualRandom(_) => {
                 self.skip_syscall(proc);
                 let n = std::cmp::min(count, 65536);
-                Ok(vec![0x42u8; n])
+                let mut buf = vec![0u8; n];
+                self.time_manager.fill_random_bytes(&mut buf);
+                Ok(buf)
             }
             DeterministicFd::VirtualUuid(_, _) => {
                 self.skip_syscall(proc);
@@ -1296,43 +1536,53 @@ impl Linux<DeterministicFd> for Deterministic {
         }
 
         self.skip_syscall(proc);
-        let mut waited_ms: i64 = 0;
+        let deadline = if timeout > 0 {
+            Some(self.time_manager.get_time() + Duration::from_millis(timeout as u64))
+        } else {
+            None
+        };
+
         loop {
+            let (now, io_epoch) = self.time_manager.get_time_and_io_epoch();
             let mut ready_count = 0;
-            let inner = self.network.inner.lock().unwrap();
-            for f in fds.iter_mut() {
-                f.revents = 0;
-                match f.fd {
-                    None => {
-                        if f.raw_fd >= 0 {
-                            f.revents = libc::POLLNVAL;
-                            ready_count += 1;
-                        }
-                    }
-                    Some(DeterministicFd::Virtualized(_, idx)) => {
-                        let sock = inner.sockets[idx].lock().unwrap();
-                        if !sock.read_buf.is_empty() || (sock.is_listener && !sock.backlog.is_empty()) {
-                            f.revents |= f.events & (libc::POLLIN | libc::POLLRDNORM);
-                        }
-                        if !sock.closed && !sock.is_listener {
-                            f.revents |= f.events & (libc::POLLOUT | libc::POLLWRNORM);
-                        }
-                        if sock.closed {
-                            f.revents |= libc::POLLHUP;
-                            if (f.events & libc::POLLIN) != 0 {
-                                f.revents |= libc::POLLIN;
+            {
+                let inner = self.network.inner.lock().unwrap();
+                for f in fds.iter_mut() {
+                    f.revents = 0;
+                    match f.fd {
+                        None => {
+                            if f.raw_fd >= 0 {
+                                f.revents = libc::POLLNVAL;
+                                ready_count += 1;
                             }
                         }
-                        if f.revents != 0 {
-                            ready_count += 1;
+                        Some(DeterministicFd::Virtualized(_, idx)) => {
+                            let mut sock = inner.sockets[idx].lock().unwrap();
+                            sock.deliver_due(now);
+                            let closed_now = sock.is_closed();
+                            if !sock.read_buf.is_empty() || (sock.is_listener && !sock.backlog.is_empty()) {
+                                f.revents |= f.events & (libc::POLLIN | libc::POLLRDNORM);
+                            }
+                            if !sock.closed && !sock.is_listener {
+                                f.revents |= f.events & (libc::POLLOUT | libc::POLLWRNORM);
+                            }
+                            if closed_now {
+                                f.revents |= libc::POLLHUP;
+                                if (f.events & libc::POLLIN) != 0 {
+                                    f.revents |= libc::POLLIN;
+                                }
+                            }
+                            if f.revents != 0 {
+                                ready_count += 1;
+                            }
                         }
-                    }
-                    Some(DeterministicFd::VirtualRandom(_))
-                    | Some(DeterministicFd::VirtualUuid(_, _))
-                    | Some(DeterministicFd::Passthru(_)) => {
-                        f.revents = f.events & (libc::POLLIN | libc::POLLOUT | libc::POLLRDNORM | libc::POLLWRNORM);
-                        if f.revents != 0 {
-                            ready_count += 1;
+                        Some(DeterministicFd::VirtualRandom(_))
+                        | Some(DeterministicFd::VirtualUuid(_, _))
+                        | Some(DeterministicFd::Passthru(_)) => {
+                            f.revents = f.events & (libc::POLLIN | libc::POLLOUT | libc::POLLRDNORM | libc::POLLWRNORM);
+                            if f.revents != 0 {
+                                ready_count += 1;
+                            }
                         }
                     }
                 }
@@ -1342,29 +1592,215 @@ impl Linux<DeterministicFd> for Deterministic {
                 return Ok(ready_count);
             }
 
-            if timeout > 0 && waited_ms >= timeout as i64 {
-                let _ = self.time_manager.sleep(proc, Duration::from_millis(timeout as u64));
-                return Ok(0);
-            }
-
-            if !proc.is_alive() {
-                return Err(nix::Error::ESRCH);
-            }
-
-            let wait_slice = if timeout > 0 {
-                std::cmp::min(20, (timeout as i64 - waited_ms) as u64)
-            } else {
-                100
-            };
-            self.time_manager.enter_blocking();
-            let (_new_inner, timeout_res) = self.network.condvar.wait_timeout(inner, std::time::Duration::from_millis(wait_slice)).unwrap();
-            self.time_manager.exit_blocking();
-            if timeout_res.timed_out() {
-                waited_ms += wait_slice as i64;
-                if !proc.is_alive() {
-                    return Err(nix::Error::ESRCH);
+            if let Some(dl) = deadline {
+                if now >= dl {
+                    return Ok(0);
                 }
             }
+
+            self.time_manager.wait_for_io(proc, io_epoch, deadline)?;
+        }
+    }
+
+    fn epoll_ctl(
+        &mut self,
+        proc: &CapturedProcess,
+        epfd: c_int,
+        op: c_int,
+        raw_fd: c_int,
+        target_fd: Option<&DeterministicFd>,
+        event_addr: u64,
+    ) -> nix::Result<c_int> {
+        let ep_raw = epfd;
+        self.skip_syscall(proc);
+
+        if op == libc::EPOLL_CTL_DEL {
+            let mut inner = self.network.inner.lock().unwrap();
+            if let Some(table) = inner.epoll_tables.get_mut(&ep_raw) {
+                if table.remove(&raw_fd).is_some() {
+                    drop(inner);
+                    self.time_manager.notify_io();
+                    return Ok(0);
+                }
+            }
+            return Err(nix::Error::ENOENT);
+        }
+
+        if event_addr == 0 {
+            return Err(nix::Error::EFAULT);
+        }
+        // struct epoll_event on x86_64 is packed: u32 events (0..4), u64 data (4..12)
+        let bytes = proc.read_memory(event_addr as usize, 12);
+        if bytes.len() < 12 {
+            return Err(nix::Error::EFAULT);
+        }
+        let events = u32::from_ne_bytes(bytes[0..4].try_into().unwrap());
+        let data = u64::from_ne_bytes(bytes[4..12].try_into().unwrap());
+
+        let target = match target_fd {
+            Some(DeterministicFd::Virtualized(_, idx)) => EpollTarget::VirtualSocket(*idx),
+            Some(DeterministicFd::Passthru(pf))
+            | Some(DeterministicFd::VirtualRandom(pf))
+            | Some(DeterministicFd::VirtualUuid(pf, _)) => EpollTarget::Passthru(pf.0),
+            None => EpollTarget::Passthru(raw_fd),
+        };
+
+        let mut inner = self.network.inner.lock().unwrap();
+        let table = inner.epoll_tables.entry(ep_raw).or_default();
+        match op {
+            libc::EPOLL_CTL_ADD | libc::EPOLL_CTL_MOD => {
+                table.insert(
+                    raw_fd,
+                    EpollEntry {
+                        target,
+                        events,
+                        data,
+                        last_read_epoch: 0,
+                        write_notified: false,
+                        hup_notified: false,
+                    },
+                );
+            }
+            _ => return Err(nix::Error::EINVAL),
+        }
+        drop(inner);
+        self.time_manager.notify_io();
+        Ok(0)
+    }
+
+    fn epoll_wait(
+        &mut self,
+        proc: &CapturedProcess,
+        epfd: c_int,
+        events_addr: u64,
+        maxevents: c_int,
+        timeout: c_int,
+    ) -> nix::Result<c_int> {
+        if maxevents <= 0 {
+            self.skip_syscall(proc);
+            return Err(nix::Error::EINVAL);
+        }
+        if events_addr == 0 {
+            self.skip_syscall(proc);
+            return Err(nix::Error::EFAULT);
+        }
+        let ep_raw = epfd;
+        self.skip_syscall(proc);
+
+        let deadline = if timeout > 0 {
+            Some(self.time_manager.get_time() + Duration::from_millis(timeout as u64))
+        } else {
+            None
+        };
+
+        loop {
+            let (now, io_epoch) = self.time_manager.get_time_and_io_epoch();
+            let mut inner = self.network.inner.lock().unwrap();
+            let NetworkInner {
+                ref sockets,
+                ref passthru_readable,
+                ref mut epoll_tables,
+                ..
+            } = *inner;
+
+            if let Some(table) = epoll_tables.get_mut(&ep_raw) {
+                let mut ready: Vec<(c_int, u32, u64, Option<u64>, bool, bool)> = Vec::new();
+                for (&raw_fd, entry) in table.iter() {
+                    let is_et = (entry.events & (libc::EPOLLET as u32)) != 0;
+                    let mut revents: u32 = 0;
+                    let mut new_read_epoch = None;
+                    let mut set_write = false;
+                    let mut set_hup = false;
+
+                    match entry.target {
+                        EpollTarget::VirtualSocket(idx) => {
+                            let mut sock = sockets[idx].lock().unwrap();
+                            sock.deliver_due(now);
+                            let closed_now = sock.is_closed();
+                            let has_read = !sock.read_buf.is_empty()
+                                || (sock.is_listener && !sock.backlog.is_empty());
+                            let can_write = !sock.closed && !sock.is_listener;
+
+                            if (entry.events & (libc::EPOLLIN as u32 | libc::EPOLLRDNORM as u32)) != 0 {
+                                if has_read {
+                                    if !is_et || entry.last_read_epoch != sock.read_epoch {
+                                        revents |= entry.events & (libc::EPOLLIN as u32 | libc::EPOLLRDNORM as u32);
+                                        new_read_epoch = Some(sock.read_epoch);
+                                    }
+                                } else if closed_now && (!is_et || !entry.hup_notified) {
+                                    revents |= libc::EPOLLIN as u32;
+                                }
+                            }
+
+                            if (entry.events & (libc::EPOLLOUT as u32 | libc::EPOLLWRNORM as u32)) != 0 && can_write {
+                                if !is_et || !entry.write_notified {
+                                    revents |= entry.events & (libc::EPOLLOUT as u32 | libc::EPOLLWRNORM as u32);
+                                    set_write = true;
+                                }
+                            }
+
+                            if closed_now && (!is_et || !entry.hup_notified) {
+                                revents |= libc::EPOLLHUP as u32;
+                                if (entry.events & (libc::EPOLLRDHUP as u32)) != 0 {
+                                    revents |= libc::EPOLLRDHUP as u32;
+                                }
+                                set_hup = true;
+                            }
+                        }
+                        EpollTarget::Passthru(p_fd) => {
+                            if passthru_readable.contains(&p_fd)
+                                && (entry.events & (libc::EPOLLIN as u32 | libc::EPOLLRDNORM as u32)) != 0
+                            {
+                                revents |= entry.events & (libc::EPOLLIN as u32 | libc::EPOLLRDNORM as u32);
+                            }
+                        }
+                    }
+
+                    if revents != 0 {
+                        ready.push((raw_fd, revents, entry.data, new_read_epoch, set_write, set_hup));
+                    }
+                }
+
+                if !ready.is_empty() || timeout == 0 {
+                    self.time_manager.maybe_shuffle_epoll(&mut ready);
+                    ready.truncate(maxevents as usize);
+                    for &(raw_fd, _, _, new_read_epoch, set_write, set_hup) in &ready {
+                        if let Some(entry) = table.get_mut(&raw_fd) {
+                            if let Some(ep) = new_read_epoch {
+                                entry.last_read_epoch = ep;
+                            }
+                            if set_write {
+                                entry.write_notified = true;
+                            }
+                            if set_hup {
+                                entry.hup_notified = true;
+                            }
+                        }
+                    }
+                    drop(inner);
+
+                    let mut out_bytes = Vec::with_capacity(ready.len() * 12);
+                    for &(_, rev, data, _, _, _) in &ready {
+                        out_bytes.extend_from_slice(&rev.to_ne_bytes());
+                        out_bytes.extend_from_slice(&data.to_ne_bytes());
+                    }
+                    if !out_bytes.is_empty() {
+                        proc.write_memory(events_addr as usize, &out_bytes);
+                    }
+                    return Ok(ready.len() as c_int);
+                }
+            } else if timeout == 0 {
+                return Ok(0);
+            }
+            drop(inner);
+
+            if let Some(dl) = deadline {
+                if now >= dl {
+                    return Ok(0);
+                }
+            }
+
+            self.time_manager.wait_for_io(proc, io_epoch, deadline)?;
         }
     }
 
@@ -1520,9 +1956,7 @@ impl Linux<DeterministicFd> for Deterministic {
     }
 
     fn getrandom(&mut self, proc: &CapturedProcess, buf: &mut [u8], _flags: c_int) -> nix::Result<usize> {
-        for i in 0..buf.len() {
-            buf[i] = 0x42;
-        }
+        self.time_manager.fill_random_bytes(buf);
         if self.passthru.verbose {
             println!("getrandom(..., {}, ...) = {} (DETERMINISTIC)", buf.len(), buf.len());
         }
@@ -1865,7 +2299,9 @@ impl Linux<DeterministicFd> for Deterministic {
 
     fn on_exec(&mut self, proc: &CapturedProcess, sp: u64) {
         self.time_manager.register_exec_tid(proc.pid.as_raw());
-        crate::vdso::scrub_auxv_random(proc, sp);
+        let mut rand_bytes = [0u8; 16];
+        self.time_manager.fill_random_bytes(&mut rand_bytes);
+        crate::vdso::scrub_auxv_random(proc, sp, &rand_bytes);
     }
 
     fn on_exit(&mut self, proc: &CapturedProcess) {
@@ -2096,18 +2532,20 @@ impl Linux<DeterministicFd> for Deterministic {
             }
             DeterministicFd::Virtualized(_, idx) => {
                 self.skip_syscall(proc);
-                let inner = self.network.inner.lock().unwrap();
-                let mut sock = inner.sockets[*idx].lock().unwrap();
-                if how == libc::SHUT_RD || how == libc::SHUT_RDWR {
-                    sock.closed = true;
+                {
+                    let inner = self.network.inner.lock().unwrap();
+                    let mut sock = inner.sockets[*idx].lock().unwrap();
+                    if how == libc::SHUT_RD || how == libc::SHUT_RDWR {
+                        sock.closed = true;
+                    }
+                    if (how == libc::SHUT_WR || how == libc::SHUT_RDWR) && sock.peer.is_some() {
+                        let peer_idx = sock.peer.unwrap();
+                        drop(sock);
+                        let mut peer = inner.sockets[peer_idx].lock().unwrap();
+                        peer.closed = true;
+                    }
                 }
-                if (how == libc::SHUT_WR || how == libc::SHUT_RDWR) && sock.peer.is_some() {
-                    let peer_idx = sock.peer.unwrap();
-                    drop(sock);
-                    let mut peer = inner.sockets[peer_idx].lock().unwrap();
-                    peer.closed = true;
-                }
-                self.network.condvar.notify_all();
+                self.time_manager.notify_io();
                 Ok(0)
             }
         }
@@ -2304,24 +2742,32 @@ impl Deterministic {
     }
 
     fn release_virtual_socket(&self, idx: usize) {
-        let inner = self.network.inner.lock().unwrap();
-        let mut sock = inner.sockets[idx].lock().unwrap();
-        if sock.open_count > 0 {
-            sock.open_count -= 1;
-        }
-        if sock.open_count == 0 {
-            sock.closed = true;
-            if let Some(peer_idx) = sock.peer {
-                drop(sock);
-                let mut peer_sock = inner.sockets[peer_idx].lock().unwrap();
-                peer_sock.closed = true;
+        let mut closed_any = false;
+        {
+            let inner = self.network.inner.lock().unwrap();
+            let mut sock = inner.sockets[idx].lock().unwrap();
+            if sock.open_count > 0 {
+                sock.open_count -= 1;
             }
-            self.network.condvar.notify_all();
+            if sock.open_count == 0 {
+                sock.closed = true;
+                if let Some(peer_idx) = sock.peer {
+                    drop(sock);
+                    let mut peer_sock = inner.sockets[peer_idx].lock().unwrap();
+                    peer_sock.closed = true;
+                }
+                closed_any = true;
+            }
+        }
+        if closed_any {
+            self.time_manager.notify_io();
         }
     }
 
     fn virtual_write(&mut self, proc: &CapturedProcess, idx: usize, buf: &[u8]) -> nix::Result<usize> {
         self.skip_syscall(proc);
+        let delay = self.time_manager.sample_network_jitter();
+        let now = self.time_manager.get_time();
         let inner = self.network.inner.lock().unwrap();
         let sock = inner.sockets[idx].lock().unwrap();
         let peer_idx = sock.peer.ok_or(nix::Error::ENOTCONN)?;
@@ -2330,8 +2776,20 @@ impl Deterministic {
         if peer_sock.closed {
             return Err(nix::Error::EPIPE);
         }
-        peer_sock.read_buf.extend_from_slice(buf);
-        self.network.condvar.notify_all();
+        if delay.is_zero() && peer_sock.in_flight.is_empty() {
+            peer_sock.read_buf.extend_from_slice(buf);
+            peer_sock.read_epoch = peer_sock.read_epoch.wrapping_add(1);
+            drop(peer_sock);
+            drop(inner);
+            self.time_manager.notify_io();
+        } else {
+            let last_delivery = peer_sock.in_flight.back().map(|(t, _)| *t).unwrap_or(now);
+            let delivery_time = std::cmp::max(last_delivery, now + delay);
+            peer_sock.in_flight.push_back((delivery_time, buf.to_vec()));
+            drop(peer_sock);
+            drop(inner);
+            self.time_manager.schedule_wakeup(delivery_time);
+        }
         Ok(buf.len())
     }
 
@@ -2343,9 +2801,12 @@ impl Deterministic {
         let peek = (flags & libc::MSG_PEEK) != 0;
         let dontwait = (flags & libc::MSG_DONTWAIT) != 0;
         loop {
-            let mut inner = self.network.inner.lock().unwrap();
+            let (now, io_epoch) = self.time_manager.get_time_and_io_epoch();
             let (res, is_nonblocking) = {
+                let inner = self.network.inner.lock().unwrap();
                 let mut sock = inner.sockets[idx].lock().unwrap();
+                sock.deliver_due(now);
+                let closed_now = sock.is_closed();
                 if !sock.read_buf.is_empty() {
                     let n = std::cmp::min(count, sock.read_buf.len());
                     let buf = if peek {
@@ -2354,40 +2815,34 @@ impl Deterministic {
                         sock.read_buf.drain(0..n).collect()
                     };
                     (Some(Ok(buf)), sock.nonblocking)
-                } else if sock.closed {
+                } else if closed_now {
                     (Some(Ok(Vec::new())), sock.nonblocking)
                 } else {
                     (None, sock.nonblocking)
                 }
             };
-            
+
             if let Some(r) = res {
                 self.skip_syscall(proc);
                 return r;
             }
 
             if is_nonblocking || dontwait {
-                drop(inner);
                 self.skip_syscall(proc);
                 return Err(nix::Error::EAGAIN);
             }
 
-            if !proc.is_alive() {
-                return Err(nix::Error::ESRCH);
-            }
-
-            // Wait for data with timeout
-            self.time_manager.enter_blocking();
-            let (new_inner, timeout_res) = self.network.condvar.wait_timeout(inner, std::time::Duration::from_millis(100)).unwrap();
-            self.time_manager.exit_blocking();
-            inner = new_inner;
-            if timeout_res.timed_out() && !proc.is_alive() {
-                return Err(nix::Error::ESRCH);
-            }
+            self.time_manager.wait_for_io(proc, io_epoch, None)?;
         }
     }
 
     fn virtual_close(&mut self, proc: &CapturedProcess, raw_fd: c_int, idx: usize) -> nix::Result<c_int> {
+        {
+            let mut inner = self.network.inner.lock().unwrap();
+            for table in inner.epoll_tables.values_mut() {
+                table.remove(&raw_fd);
+            }
+        }
         self.release_virtual_socket(idx);
         let res = proc.close(raw_fd)?;
         Ok(res as c_int)

@@ -59,7 +59,7 @@ pub fn disable_vdso(child: Pid, sp: u64) {
     }
 }
 
-pub fn scrub_auxv_random(proc: &crate::captured::CapturedProcess, sp: u64) {
+pub fn scrub_auxv_random(proc: &crate::captured::CapturedProcess, sp: u64, random_bytes: &[u8; 16]) {
     let bytes = proc.read_memory(sp as usize, 8);
     if bytes.len() < 8 {
         return;
@@ -93,8 +93,9 @@ pub fn scrub_auxv_random(proc: &crate::captured::CapturedProcess, sp: u64) {
         }
         if key == 25 && val != 0 {
             // AT_RANDOM points to 16 random bytes on stack
-            proc.write_memory(val as usize, &[0x42u8; 16]);
+            proc.write_memory(val as usize, random_bytes);
         }
         addr += 16;
     }
 }
+

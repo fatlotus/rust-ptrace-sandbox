@@ -999,21 +999,11 @@ where
             let nfds = std::cmp::min(regs.rsi as usize, 4096);
             let timeout = if sysno == Some(Sysno::poll) {
                 regs.rdx as i32
-            } else if regs.rdx == 0 {
-                -1
             } else {
-                let ts = proc.read_memory(regs.rdx as usize, 16);
-                if ts.len() < 16 {
-                    let _ = proc.skip_syscall();
-                    return Some(-libc::EFAULT as i64);
+                match read_timespec_timeout_ms(&proc, regs.rdx as usize) {
+                    Ok(t) => t,
+                    Err(errno) => return Some(errno),
                 }
-                let sec = i64::from_ne_bytes(ts[0..8].try_into().unwrap());
-                let nsec = i64::from_ne_bytes(ts[8..16].try_into().unwrap());
-                if sec < 0 || nsec < 0 || nsec >= 1_000_000_000 {
-                    let _ = proc.skip_syscall();
-                    return Some(-libc::EINVAL as i64);
-                }
-                sec.saturating_mul(1000).saturating_add(nsec / 1_000_000).clamp(0, i32::MAX as i64) as i32
             };
             let mut fds = read_pollfds(pid, fds_addr, nfds, state);
             
@@ -1365,13 +1355,56 @@ where
             }
             None
         }
-        Some(Sysno::rt_sigprocmask) => {
-            // Let it fall through to the kernel.
-            // We handle it here just to avoid the "unknown system call" message.
-            None
+        Some(Sysno::epoll_ctl) => {
+            let epfd_raw = regs.rdi as i32;
+            let op = regs.rsi as i32;
+            let target_raw = regs.rdx as i32;
+            let event_addr = regs.r10;
+            if epfd_raw < 0 || target_raw < 0 {
+                return ebadf(&proc);
+            }
+            let target_fd = get_fd(state, target_raw);
+            match handler.epoll_ctl(&proc, epfd_raw, op, target_raw, target_fd.as_ref(), event_addr) {
+                Ok(res) => Some(res as i64),
+                Err(err) => Some(-(err as i32) as i64),
+            }
         }
-        Some(Sysno::rt_sigaction) => {
-            // Let it fall through to the kernel.
+        Some(Sysno::epoll_wait) | Some(Sysno::epoll_pwait) | Some(Sysno::epoll_pwait2) => {
+            let epfd_raw = regs.rdi as i32;
+            let events_addr = regs.rsi;
+            let maxevents = regs.rdx as i32;
+            if epfd_raw < 0 {
+                return ebadf(&proc);
+            }
+            let timeout = if sysno == Some(Sysno::epoll_pwait2) {
+                match read_timespec_timeout_ms(&proc, regs.r10 as usize) {
+                    Ok(t) => t,
+                    Err(errno) => return Some(errno),
+                }
+            } else {
+                regs.r10 as i32
+            };
+            match handler.epoll_wait(&proc, epfd_raw, events_addr, maxevents, timeout) {
+                Ok(res) => Some(res as i64),
+                Err(err) => Some(-(err as i32) as i64),
+            }
+        }
+        Some(Sysno::rt_sigprocmask)
+        | Some(Sysno::rt_sigaction)
+        | Some(Sysno::rt_sigreturn)
+        | Some(Sysno::sigaltstack)
+        | Some(Sysno::access)
+        | Some(Sysno::arch_prctl)
+        | Some(Sysno::set_robust_list)
+        | Some(Sysno::rseq)
+        | Some(Sysno::mprotect)
+        | Some(Sysno::madvise)
+        | Some(Sysno::prlimit64)
+        | Some(Sysno::sched_getaffinity)
+        | Some(Sysno::sched_setaffinity)
+        | Some(Sysno::sched_yield)
+        | Some(Sysno::prctl) => {
+            // Let it fall through to the kernel without printing "unknown system call".
             None
         }
         Some(Sysno::getrandom) => {
@@ -1437,6 +1470,28 @@ where
         }
         _ => None,
     }
+}
+
+fn read_timespec_timeout_ms(proc: &crate::captured::CapturedProcess, addr: usize) -> Result<i32, i64> {
+    if addr == 0 {
+        return Ok(-1);
+    }
+    let ts = proc.read_memory(addr, 16);
+    if ts.len() < 16 {
+        let _ = proc.skip_syscall();
+        return Err(-libc::EFAULT as i64);
+    }
+    let sec = i64::from_ne_bytes(ts[0..8].try_into().unwrap());
+    let nsec = i64::from_ne_bytes(ts[8..16].try_into().unwrap());
+    if sec < 0 || nsec < 0 || nsec >= 1_000_000_000 {
+        let _ = proc.skip_syscall();
+        return Err(-libc::EINVAL as i64);
+    }
+    let ms = sec
+        .saturating_mul(1000)
+        .saturating_add((nsec + 999_999) / 1_000_000)
+        .clamp(0, i32::MAX as i64) as i32;
+    Ok(ms)
 }
 
 fn ebadf(proc: &crate::captured::CapturedProcess) -> Option<i64> {
