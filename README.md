@@ -52,11 +52,11 @@ cargo run -- --passthru date
 Run the test suite:
 
 ```bash
-cargo test --target x86_64-unknown-linux-gnu
+cargo test
 ```
 
 Run the stress test suite:
 
 ```bash
-cargo test --target x86_64-unknown-linux-gnu --features stress
+cargo test --features stress
 ```
