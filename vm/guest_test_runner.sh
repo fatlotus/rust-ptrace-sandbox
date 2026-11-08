@@ -15,7 +15,7 @@ fi
 if [[ ${#TESTS[@]} -eq 0 ]]; then
     # Fallback auto-discovery
     DEPS_DIR="/workspace/target/x86_64-unknown-linux-musl/debug/deps"
-    for name in echo_test cat_test date_test fork_test futex_test networking networking_sandbox sqlite_test deterministic_test ptrace; do
+    for name in determinism_test filesystem_test concurrency_test networking_test cli_test ptrace; do
         bin=$(find "$DEPS_DIR" -maxdepth 1 -type f -name "${name}-*" ! -name "*.*" -perm -111 2>/dev/null | head -n 1)
         if [[ -n "$bin" && -x "$bin" ]]; then
             TESTS+=("$bin")

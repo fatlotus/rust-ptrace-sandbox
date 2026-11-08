@@ -1,13 +1,6 @@
-mod linux;
-mod passthru;
-mod interceptor;
-mod vdso;
-mod captured;
-mod deterministic;
-
-use passthru::Passthru;
-use deterministic::Deterministic;
-use interceptor::run_with_interceptor;
+use ptrace::deterministic::Deterministic;
+use ptrace::interceptor::run_with_interceptor;
+use ptrace::passthru::Passthru;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();

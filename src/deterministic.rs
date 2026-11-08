@@ -673,8 +673,12 @@ impl Deterministic {
             DeterministicFd::VirtualRandom(fd)
         } else if check_path == "/proc/sys/kernel/random/uuid"
             || check_path == "/proc/sys/kernel/random/boot_id"
+            || check_path == "/etc/machine-id"
+            || check_path == "/var/lib/dbus/machine-id"
             || pathname.ends_with("/proc/sys/kernel/random/uuid")
             || pathname.ends_with("/proc/sys/kernel/random/boot_id")
+            || pathname.ends_with("/etc/machine-id")
+            || pathname.ends_with("/var/lib/dbus/machine-id")
         {
             DeterministicFd::VirtualUuid(fd, 0)
         } else {
@@ -1082,7 +1086,10 @@ impl Linux<DeterministicFd> for Deterministic {
                             if (flags & libc::SOCK_NONBLOCK) != 0 {
                                 c_sock.nonblocking = true;
                             }
-                            (Some((c_idx, c_sock.addr)), sock.nonblocking)
+                            let peer_idx = c_sock.peer;
+                            drop(c_sock);
+                            let client_addr = peer_idx.and_then(|p| inner.sockets[p].lock().unwrap().addr);
+                            (Some((c_idx, client_addr)), sock.nonblocking)
                         } else {
                             (None, sock.nonblocking)
                         }
@@ -1170,9 +1177,9 @@ impl Linux<DeterministicFd> for Deterministic {
                     SocketAddr::from(([127, 0, 0, 1], port))
                 });
 
-                // Create a peer socket for the server to use (whose addr is the client's address for accept())
+                // Create the server-side accepted socket (local addr = dest_addr, peer = client *idx)
                 let peer_sock = VirtualSocket {
-                    addr: Some(client_addr),
+                    addr: Some(dest_addr),
                     is_listener: false,
                     backlog: Vec::new(),
                     peer: Some(*idx),
@@ -1987,6 +1994,168 @@ impl Linux<DeterministicFd> for Deterministic {
             proc.write_memory(node_addr as usize, &0u32.to_ne_bytes());
         }
         Ok(0)
+    }
+
+    fn clock_getres(&mut self, proc: &CapturedProcess, _clk_id: libc::clockid_t, res_addr: u64) -> nix::Result<c_int> {
+        self.skip_syscall(proc);
+        if res_addr != 0 {
+            let mut bytes = [0u8; 16];
+            bytes[8..16].copy_from_slice(&1i64.to_ne_bytes());
+            proc.write_memory(res_addr as usize, &bytes);
+        }
+        Ok(0)
+    }
+
+    fn getresuid(&mut self, proc: &CapturedProcess, ruid_addr: u64, euid_addr: u64, suid_addr: u64) -> nix::Result<c_int> {
+        self.skip_syscall(proc);
+        let uid = 1000u32.to_ne_bytes();
+        if ruid_addr != 0 {
+            proc.write_memory(ruid_addr as usize, &uid);
+        }
+        if euid_addr != 0 {
+            proc.write_memory(euid_addr as usize, &uid);
+        }
+        if suid_addr != 0 {
+            proc.write_memory(suid_addr as usize, &uid);
+        }
+        Ok(0)
+    }
+
+    fn getresgid(&mut self, proc: &CapturedProcess, rgid_addr: u64, egid_addr: u64, sgid_addr: u64) -> nix::Result<c_int> {
+        self.skip_syscall(proc);
+        let gid = 1000u32.to_ne_bytes();
+        if rgid_addr != 0 {
+            proc.write_memory(rgid_addr as usize, &gid);
+        }
+        if egid_addr != 0 {
+            proc.write_memory(egid_addr as usize, &gid);
+        }
+        if sgid_addr != 0 {
+            proc.write_memory(sgid_addr as usize, &gid);
+        }
+        Ok(0)
+    }
+
+    fn getpeername(&mut self, proc: &CapturedProcess, fd: &mut DeterministicFd, addr: *mut libc::sockaddr, len: *mut libc::socklen_t) -> nix::Result<c_int> {
+        use std::os::unix::io::AsRawFd;
+        match fd {
+            DeterministicFd::Passthru(_) | DeterministicFd::VirtualRandom(_) | DeterministicFd::VirtualUuid(_, _) => {
+                let res = proc.syscall(libc::SYS_getpeername as u64, fd.as_raw_fd() as u64, addr as u64, len as u64, 0, 0, 0)?;
+                Ok(res as c_int)
+            }
+            DeterministicFd::Virtualized(_, idx) => {
+                self.skip_syscall(proc);
+                let peer_addr = {
+                    let inner = self.network.inner.lock().unwrap();
+                    let sock = inner.sockets[*idx].lock().unwrap();
+                    let peer_idx = sock.peer.ok_or(nix::Error::ENOTCONN)?;
+                    drop(sock);
+                    let peer_sock = inner.sockets[peer_idx].lock().unwrap();
+                    peer_sock.addr.unwrap_or_else(|| SocketAddr::from(([127, 0, 0, 1], 0)))
+                };
+                unsafe {
+                    self.write_sockaddr(proc, addr, len, peer_addr)?;
+                }
+                Ok(0)
+            }
+        }
+    }
+
+    fn getsockopt(&mut self, proc: &CapturedProcess, fd: &mut DeterministicFd, level: c_int, optname: c_int, optval: u64, optlen: u64) -> nix::Result<c_int> {
+        use std::os::unix::io::AsRawFd;
+        match fd {
+            DeterministicFd::Passthru(_) | DeterministicFd::VirtualRandom(_) | DeterministicFd::VirtualUuid(_, _) => {
+                let res = proc.syscall(libc::SYS_getsockopt as u64, fd.as_raw_fd() as u64, level as u64, optname as u64, optval, optlen, 0)?;
+                Ok(res as c_int)
+            }
+            DeterministicFd::Virtualized(_, _) => {
+                self.skip_syscall(proc);
+                if optval != 0 && optlen != 0 {
+                    let len_bytes = proc.read_memory(optlen as usize, 4);
+                    if len_bytes.len() < 4 {
+                        return Err(nix::Error::EFAULT);
+                    }
+                    let max_len = u32::from_ne_bytes(len_bytes[0..4].try_into().unwrap()) as usize;
+                    let write_len = std::cmp::min(max_len, 4);
+                    if write_len > 0 {
+                        proc.write_memory(optval as usize, &[0u8; 4][..write_len]);
+                    }
+                    proc.write_memory(optlen as usize, &(write_len as u32).to_ne_bytes());
+                }
+                Ok(0)
+            }
+        }
+    }
+
+    fn shutdown(&mut self, proc: &CapturedProcess, fd: &mut DeterministicFd, how: c_int) -> nix::Result<c_int> {
+        use std::os::unix::io::AsRawFd;
+        match fd {
+            DeterministicFd::Passthru(_) | DeterministicFd::VirtualRandom(_) | DeterministicFd::VirtualUuid(_, _) => {
+                let res = proc.syscall(libc::SYS_shutdown as u64, fd.as_raw_fd() as u64, how as u64, 0, 0, 0, 0)?;
+                Ok(res as c_int)
+            }
+            DeterministicFd::Virtualized(_, idx) => {
+                self.skip_syscall(proc);
+                let inner = self.network.inner.lock().unwrap();
+                let mut sock = inner.sockets[*idx].lock().unwrap();
+                if how == libc::SHUT_RD || how == libc::SHUT_RDWR {
+                    sock.closed = true;
+                }
+                if (how == libc::SHUT_WR || how == libc::SHUT_RDWR) && sock.peer.is_some() {
+                    let peer_idx = sock.peer.unwrap();
+                    drop(sock);
+                    let mut peer = inner.sockets[peer_idx].lock().unwrap();
+                    peer.closed = true;
+                }
+                self.network.condvar.notify_all();
+                Ok(0)
+            }
+        }
+    }
+
+    fn sendmsg(&mut self, proc: &CapturedProcess, fd: &mut DeterministicFd, msg_addr: u64, flags: c_int) -> nix::Result<usize> {
+        use std::os::unix::io::AsRawFd;
+        match fd {
+            DeterministicFd::Passthru(_) | DeterministicFd::VirtualRandom(_) | DeterministicFd::VirtualUuid(_, _) => {
+                let res = proc.syscall(libc::SYS_sendmsg as u64, fd.as_raw_fd() as u64, msg_addr, flags as u64, 0, 0, 0)?;
+                Ok(res as usize)
+            }
+            DeterministicFd::Virtualized(_, _) => {
+                let hdr = proc.read_memory(msg_addr as usize, 32);
+                if hdr.len() < 32 {
+                    self.skip_syscall(proc);
+                    return Err(nix::Error::EFAULT);
+                }
+                let iov = u64::from_ne_bytes(hdr[16..24].try_into().unwrap());
+                let iovcnt = u64::from_ne_bytes(hdr[24..32].try_into().unwrap()) as i32;
+                self.writev(proc, fd, iov, iovcnt)
+            }
+        }
+    }
+
+    fn recvmsg(&mut self, proc: &CapturedProcess, fd: &mut DeterministicFd, msg_addr: u64, flags: c_int) -> nix::Result<usize> {
+        use std::os::unix::io::AsRawFd;
+        match fd {
+            DeterministicFd::Passthru(_) | DeterministicFd::VirtualRandom(_) | DeterministicFd::VirtualUuid(_, _) => {
+                let res = proc.syscall(libc::SYS_recvmsg as u64, fd.as_raw_fd() as u64, msg_addr, flags as u64, 0, 0, 0)?;
+                Ok(res as usize)
+            }
+            DeterministicFd::Virtualized(_, idx) => {
+                let hdr = proc.read_memory(msg_addr as usize, 56);
+                if hdr.len() < 32 {
+                    self.skip_syscall(proc);
+                    return Err(nix::Error::EFAULT);
+                }
+                let iov = u64::from_ne_bytes(hdr[16..24].try_into().unwrap());
+                let iovcnt = u64::from_ne_bytes(hdr[24..32].try_into().unwrap()) as i32;
+                let (iovecs, total_len) = self.read_iovecs(proc, iov, iovcnt)?;
+                let data = self.virtual_read(proc, *idx, total_len, flags)?;
+                if hdr.len() >= 52 {
+                    proc.write_memory((msg_addr + 48) as usize, &0i32.to_ne_bytes());
+                }
+                Ok(Self::scatter_iovecs(proc, &iovecs, &data))
+            }
+        }
     }
 
     fn is_verbose(&self) -> bool {

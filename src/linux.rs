@@ -310,6 +310,69 @@ pub trait Linux<Fd> {
         Ok(res as c_int)
     }
 
+    /// clock_getres - find the resolution (precision) of the specified clock
+    fn clock_getres(&mut self, proc: &CapturedProcess, clk_id: libc::clockid_t, res_addr: u64) -> nix::Result<c_int> {
+        let res = proc.syscall(libc::SYS_clock_getres as u64, clk_id as u64, res_addr, 0, 0, 0, 0)?;
+        Ok(res as c_int)
+    }
+
+    /// getresuid - get real, effective, and saved user IDs
+    fn getresuid(&mut self, proc: &CapturedProcess, ruid_addr: u64, euid_addr: u64, suid_addr: u64) -> nix::Result<c_int> {
+        let res = proc.syscall(libc::SYS_getresuid as u64, ruid_addr, euid_addr, suid_addr, 0, 0, 0)?;
+        Ok(res as c_int)
+    }
+
+    /// getresgid - get real, effective, and saved group IDs
+    fn getresgid(&mut self, proc: &CapturedProcess, rgid_addr: u64, egid_addr: u64, sgid_addr: u64) -> nix::Result<c_int> {
+        let res = proc.syscall(libc::SYS_getresgid as u64, rgid_addr, egid_addr, sgid_addr, 0, 0, 0)?;
+        Ok(res as c_int)
+    }
+
+    /// getpeername - get name of connected peer socket
+    fn getpeername(&mut self, proc: &CapturedProcess, fd: &mut Fd, addr: *mut libc::sockaddr, len: *mut libc::socklen_t) -> nix::Result<c_int>
+    where
+        Fd: std::os::unix::io::AsRawFd,
+    {
+        let res = proc.syscall(libc::SYS_getpeername as u64, fd.as_raw_fd() as u64, addr as u64, len as u64, 0, 0, 0)?;
+        Ok(res as c_int)
+    }
+
+    /// getsockopt - get options on sockets
+    fn getsockopt(&mut self, proc: &CapturedProcess, fd: &mut Fd, level: c_int, optname: c_int, optval: u64, optlen: u64) -> nix::Result<c_int>
+    where
+        Fd: std::os::unix::io::AsRawFd,
+    {
+        let res = proc.syscall(libc::SYS_getsockopt as u64, fd.as_raw_fd() as u64, level as u64, optname as u64, optval, optlen, 0)?;
+        Ok(res as c_int)
+    }
+
+    /// shutdown - shut down part of a full-duplex connection
+    fn shutdown(&mut self, proc: &CapturedProcess, fd: &mut Fd, how: c_int) -> nix::Result<c_int>
+    where
+        Fd: std::os::unix::io::AsRawFd,
+    {
+        let res = proc.syscall(libc::SYS_shutdown as u64, fd.as_raw_fd() as u64, how as u64, 0, 0, 0, 0)?;
+        Ok(res as c_int)
+    }
+
+    /// sendmsg - send a message on a socket using a message structure
+    fn sendmsg(&mut self, proc: &CapturedProcess, fd: &mut Fd, msg_addr: u64, flags: c_int) -> nix::Result<usize>
+    where
+        Fd: std::os::unix::io::AsRawFd,
+    {
+        let res = proc.syscall(libc::SYS_sendmsg as u64, fd.as_raw_fd() as u64, msg_addr, flags as u64, 0, 0, 0)?;
+        Ok(res as usize)
+    }
+
+    /// recvmsg - receive a message from a socket using a message structure
+    fn recvmsg(&mut self, proc: &CapturedProcess, fd: &mut Fd, msg_addr: u64, flags: c_int) -> nix::Result<usize>
+    where
+        Fd: std::os::unix::io::AsRawFd,
+    {
+        let res = proc.syscall(libc::SYS_recvmsg as u64, fd.as_raw_fd() as u64, msg_addr, flags as u64, 0, 0, 0)?;
+        Ok(res as usize)
+    }
+
     /// is_verbose - check if verbose logging is enabled
     fn is_verbose(&self) -> bool;
 

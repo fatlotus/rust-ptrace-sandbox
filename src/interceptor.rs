@@ -48,13 +48,19 @@ where
         Ok(ForkResult::Child) => {
             ptrace::traceme().expect("Failed to traceme");
             
-            // Disable ASLR for the child process to improve determinism
             unsafe {
-                let current = libc::personality(0xffffffff);
-                if current != -1 {
-                    libc::personality(current as u64 | libc::ADDR_NO_RANDOMIZE as u64);
-                }
                 if handler.is_deterministic() {
+                    let current = libc::personality(0xffffffff);
+                    if current != -1 {
+                        libc::personality(current as u64 | libc::ADDR_NO_RANDOMIZE as u64);
+                    }
+                    let mut cpuset: libc::cpu_set_t = std::mem::zeroed();
+                    libc::CPU_SET(0, &mut cpuset);
+                    let _ = libc::sched_setaffinity(
+                        0,
+                        std::mem::size_of::<libc::cpu_set_t>(),
+                        &cpuset,
+                    );
                     libc::prctl(libc::PR_SET_TSC, libc::PR_TSC_SIGSEGV, 0, 0, 0);
                     // Enable CPUID faulting (ARCH_SET_CPUID = 0x1012) if supported by the CPU/kernel
                     let _ = libc::syscall(libc::SYS_arch_prctl, 0x1012, 0);
@@ -377,7 +383,9 @@ where
     Fd: Clone + std::os::unix::io::AsRawFd,
 {
     let proc = crate::captured::CapturedProcess::new(pid);
-    let regs = proc.get_regs().expect("Failed to get regs");
+    let Ok(regs) = proc.get_regs() else {
+        return None;
+    };
     let syscall_no = regs.orig_rax;
     let sysno = Sysno::new(syscall_no as usize);
 
@@ -913,6 +921,63 @@ where
                 ebadf(&proc)
             }
         }
+        Some(Sysno::getpeername) => {
+            if let Some(mut fd) = get_fd(state, regs.rdi as i32) {
+                let addr = regs.rsi as *mut libc::sockaddr;
+                let len = regs.rdx as *mut libc::socklen_t;
+                match handler.getpeername(&proc, &mut fd, addr, len) {
+                    Ok(res) => Some(res as i64),
+                    Err(err) => Some(-(err as i32) as i64),
+                }
+            } else {
+                ebadf(&proc)
+            }
+        }
+        Some(Sysno::getsockopt) => {
+            if let Some(mut fd) = get_fd(state, regs.rdi as i32) {
+                let level = regs.rsi as i32;
+                let optname = regs.rdx as i32;
+                let optval = regs.r10;
+                let optlen = regs.r8;
+                match handler.getsockopt(&proc, &mut fd, level, optname, optval, optlen) {
+                    Ok(res) => Some(res as i64),
+                    Err(err) => Some(-(err as i32) as i64),
+                }
+            } else {
+                ebadf(&proc)
+            }
+        }
+        Some(Sysno::shutdown) => {
+            if let Some(mut fd) = get_fd(state, regs.rdi as i32) {
+                let how = regs.rsi as i32;
+                match handler.shutdown(&proc, &mut fd, how) {
+                    Ok(res) => Some(res as i64),
+                    Err(err) => Some(-(err as i32) as i64),
+                }
+            } else {
+                ebadf(&proc)
+            }
+        }
+        Some(Sysno::sendmsg) => {
+            if let Some(mut fd) = get_fd(state, regs.rdi as i32) {
+                match handler.sendmsg(&proc, &mut fd, regs.rsi, regs.rdx as i32) {
+                    Ok(res) => Some(res as i64),
+                    Err(err) => Some(-(err as i32) as i64),
+                }
+            } else {
+                ebadf(&proc)
+            }
+        }
+        Some(Sysno::recvmsg) => {
+            if let Some(mut fd) = get_fd(state, regs.rdi as i32) {
+                match handler.recvmsg(&proc, &mut fd, regs.rsi, regs.rdx as i32) {
+                    Ok(res) => Some(res as i64),
+                    Err(err) => Some(-(err as i32) as i64),
+                }
+            } else {
+                ebadf(&proc)
+            }
+        }
         Some(Sysno::pread64) => {
             if let Some(mut fd) = get_fd(state, regs.rdi as i32) {
                 let addr = regs.rsi as usize;
@@ -929,10 +994,27 @@ where
                 ebadf(&proc)
             }
         }
-        Some(Sysno::poll) => {
+        Some(Sysno::poll) | Some(Sysno::ppoll) => {
             let fds_addr = regs.rdi as usize;
             let nfds = std::cmp::min(regs.rsi as usize, 4096);
-            let timeout = regs.rdx as i32;
+            let timeout = if sysno == Some(Sysno::poll) {
+                regs.rdx as i32
+            } else if regs.rdx == 0 {
+                -1
+            } else {
+                let ts = proc.read_memory(regs.rdx as usize, 16);
+                if ts.len() < 16 {
+                    let _ = proc.skip_syscall();
+                    return Some(-libc::EFAULT as i64);
+                }
+                let sec = i64::from_ne_bytes(ts[0..8].try_into().unwrap());
+                let nsec = i64::from_ne_bytes(ts[8..16].try_into().unwrap());
+                if sec < 0 || nsec < 0 || nsec >= 1_000_000_000 {
+                    let _ = proc.skip_syscall();
+                    return Some(-libc::EINVAL as i64);
+                }
+                sec.saturating_mul(1000).saturating_add(nsec / 1_000_000).clamp(0, i32::MAX as i64) as i32
+            };
             let mut fds = read_pollfds(pid, fds_addr, nfds, state);
             
             match handler.poll(&proc, &mut fds, timeout) {
@@ -1102,6 +1184,24 @@ where
         }
         Some(Sysno::getegid) => {
             match handler.getegid(&proc) {
+                Ok(res) => Some(res as i64),
+                Err(err) => Some(-(err as i32) as i64),
+            }
+        }
+        Some(Sysno::getresuid) => {
+            match handler.getresuid(&proc, regs.rdi, regs.rsi, regs.rdx) {
+                Ok(res) => Some(res as i64),
+                Err(err) => Some(-(err as i32) as i64),
+            }
+        }
+        Some(Sysno::getresgid) => {
+            match handler.getresgid(&proc, regs.rdi, regs.rsi, regs.rdx) {
+                Ok(res) => Some(res as i64),
+                Err(err) => Some(-(err as i32) as i64),
+            }
+        }
+        Some(Sysno::clock_getres) => {
+            match handler.clock_getres(&proc, regs.rdi as libc::clockid_t, regs.rsi) {
                 Ok(res) => Some(res as i64),
                 Err(err) => Some(-(err as i32) as i64),
             }
