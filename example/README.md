@@ -1,41 +1,40 @@
-# Raft over HTTP/REST — Finding & Reproducing a Subtle Logical Race
+# Raft over HTTP/REST: Finding and Reproducing a Log Truncation Race
 
-This directory contains a multi-node implementation of the [Raft consensus algorithm](https://raft.github.io/raft.pdf) in Go (`net/http` + JSON over loopback TCP), built to demonstrate how the `ptrace` deterministic sandbox can uncover and deterministically reproduce subtle distributed systems concurrency bugs.
-
----
+This directory contains a 3-node [Raft](https://raft.github.io/raft.pdf) cluster written in Go (`net/http` + JSON over loopback TCP). It demonstrates how `nodice` finds and reproduces a race condition in concurrent network code.
 
 ## Overview
 
-The application ([`raft.go`](./raft.go) and [`main.go`](./main.go)) starts an in-process 3-node Raft cluster where each node listens on an ephemeral `127.0.0.1` TCP port and communicates exclusively via HTTP REST endpoints:
+The program ([`raft.go`](./raft.go) and [`main.go`](./main.go)) starts three Raft nodes in a single process. Each node listens on an ephemeral `127.0.0.1` TCP port and communicates over HTTP:
 
-- `POST /raft/request-vote` — Raft `RequestVote` RPC used during leader election
-- `POST /raft/append-entries` — Raft `AppendEntries` RPC used for heartbeats and log replication
-- `POST /raft/propose` — Client command submission (`{"command": "SET k=1"}`)
-- `GET /raft/state` — Node state inspection (term, role, `commitIndex`, `lastApplied`, log entries, and applied state machine commands)
+- `POST /raft/request-vote`: `RequestVote` RPC used during leader election
+- `POST /raft/append-entries`: `AppendEntries` RPC used for heartbeats and log replication
+- `POST /raft/propose`: Client command submission (`{"command": "SET k=1"}`)
+- `GET /raft/state`: Node state inspection (term, role, `commitIndex`, `lastApplied`, log entries, and applied commands)
 
 When [`main.go`](./main.go) runs, it:
-1. Boots 3 Raft nodes (`node 0`, `node 1`, `node 2`) and waits for leader election to converge.
-2. Submits 4 pipelined client proposals (`SET k=1` .. `SET k=4`) to the elected leader via `POST /raft/propose`.
-3. Waits for replication and heartbeat settlement.
-4. Queries every node via `GET /raft/state` and verifies core Raft safety invariants (**Election Safety**, **State Machine Safety**, **Log Matching**, and **Committed Log Convergence**).
+1. Starts `node 0`, `node 1`, and `node 2`, and waits for them to elect a leader.
+2. Sends four pipelined client proposals (`SET k=1` .. `SET k=4`) to the leader.
+3. Waits briefly for replication and heartbeats to settle.
+4. Queries all three nodes and checks that committed entries are present and applied everywhere.
 
----
+## Building and Running
 
-## Building the Example
+Build the example binary:
 
 ```bash
 cd example
 go build -o raft-example .
+cd ..
 ```
 
-When run normally outside the sandbox—or inside the sandbox without jitter—RPCs over loopback arrive in order and the test passes every time:
+When run directly on the host, or under `nodice` with zero jitter, loopback RPCs arrive in FIFO order and the check passes:
 
 ```bash
 # Run directly on the host
-./raft-example
+./example/raft-example
 
-# Run in the deterministic sandbox with default settings (zero jitter)
-cargo run -- ./example/raft-example
+# Run under nodice with default settings (zero jitter)
+nodice ./example/raft-example
 ```
 
 Output:
@@ -50,11 +49,9 @@ Cluster State Summary:
 OK: All 4 proposals replicated, committed, and applied consistently across all 3 nodes.
 ```
 
----
+## The Bug: Out-of-Order `AppendEntries` Log Truncation
 
-## The Subtle Bug: Out-of-Order `AppendEntries` Log Truncation
-
-A classic, real-world mistake when implementing Raft (highlighted in the [Students' Guide to Raft](https://thesquareplanet.com/blog/students-guide-to-raft/)) occurs in the `AppendEntries` RPC handler ([`handleAppendEntries`](./raft.go#L482-L502)):
+A common mistake when implementing Raft (described in the [Students' Guide to Raft](https://thesquareplanet.com/blog/students-guide-to-raft/)) is in [`handleAppendEntries`](./raft.go#L482-L502):
 
 ```go
 if len(args.Entries) > 0 {
@@ -68,74 +65,21 @@ if len(args.Entries) > 0 {
 }
 ```
 
-### Why It Passes Normally
-Under normal loopback execution without network jitter:
-1. Proposals `SET k=1`, `SET k=2`, `SET k=3`, `SET k=4` arrive at the leader sequentially.
-2. The leader sends `AppendEntries` RPC #1 (`entries=[1]`), RPC #2 (`entries=[1, 2]`), RPC #3 (`entries=[1, 2, 3]`), and RPC #4 (`entries=[1, 2, 3, 4]`).
-3. When those HTTP requests are delivered in FIFO order across connections, each `AppendEntries` strictly extends the follower's log (`[1]` -> `[1, 2]` -> `[1, 2, 3]` -> `[1, 2, 3, 4]`).
+When the leader pipelines `AppendEntries` requests concurrently over separate HTTP connections, network jitter can deliver **RPC #4 (`entries=[1..4]`)** to a follower before **RPC #3 (`entries=[1..3]`)**:
 
-### How the Logical Race Happens Under Jitter
-When the leader pipelines multiple `AppendEntries` HTTP requests concurrently, each request uses its own TCP connection and goroutine. If network transit or epoll wakeup jitter causes **RPC #4 (`entries=[1..4]`) to be delivered to a follower before RPC #3 (`entries=[1..3]`)**:
+1. The follower receives RPC #4 first, appends entries `1..4`, and replies `Success: true`.
+2. The leader records `matchIndex = 4` and `nextIndex = 5` for that follower, advances `commitIndex = 4`, and applies all four commands.
+3. The delayed RPC #3 arrives at the follower. Its `PrevLogIndex` and `PrevLogTerm` are still valid, so `n.log = append(n.log[:args.PrevLogIndex+1], args.Entries...)` overwrites the log with `entries=[1..3]`, truncating committed entry 4.
+4. Because the leader already advanced `nextIndex = 5`, subsequent heartbeats send empty `Entries: []` and never re-send entry 4.
 
-1. **Follower receives RPC #4 (`PrevLogIndex=0, Entries=[1, 2, 3, 4]`)**:
-   - The follower appends all 4 entries (`len(n.log) - 1 == 4`) and returns `Success: true`.
-2. **Leader processes RPC #4's response**:
-   - The leader updates `matchIndex[follower] = 4` and `nextIndex[follower] = 5`, advances `commitIndex = 4`, and applies all 4 commands to its state machine.
-3. **Follower receives delayed RPC #3 (`PrevLogIndex=0, Entries=[1, 2, 3]`)**:
-   - Because `args.Term == n.currentTerm` and `n.log[0].Term == args.PrevLogTerm`, the consistency check passes.
-   - `n.log = append(n.log[:args.PrevLogIndex+1], args.Entries...)` **truncates entry 4 (`SET k=4`) off the follower's log**!
-4. **Silent permanent divergence**:
-   - Because the leader already recorded `nextIndex[follower] = 5`, subsequent leader heartbeats send `Entries: []` (`LeaderCommit: 4`), which never re-transmits entry 4. The follower's log and state machine remain permanently missing committed entry 4!
+## Finding and Reproducing the Bug with `nodice`
 
----
+### 1. Search Across Iterations
 
-## Finding & Reproducing the Bug with the Sandbox
-
-The `ptrace` sandbox supports two flags for deterministic fault/schedule exploration:
-- `--seed <N>`: Seeds the sandbox's deterministic ChaCha12 PRNG, controlling `AT_RANDOM` (which seeds the Go runtime's internal `fastrand` scheduler/select tie-breaker and `math/rand`), `getrandom`, `/dev/urandom`, network transit delays, and timer jitter.
-- `--jitter <duration>`: Enables deterministic virtual network transit jitter (up to `<duration>` per packet), `epoll_wait` ready-list shuffling, and sleep/timer jitter.
-
-### 1. Fuzzing Seeds to Discover the Bug
-
-Run a sweep across seeds `1..15` with `--jitter 15ms` from the repository root:
+Instead of writing a shell loop, pass `--iterations` to `nodice`. It runs the test in parallel across all CPU cores, hides the output from successful runs, and increases the jitter from `1ms` upward until an iteration fails:
 
 ```bash
-cargo build
-
-for seed in $(seq 1 15); do
-  if ./target/debug/ptrace --seed $seed --jitter 15ms ./example/raft-example >/dev/null 2>&1; then
-    echo "seed $seed: PASS"
-  else
-    echo "seed $seed: FAIL (bug triggered!)"
-  fi
-done
-```
-
-Output:
-```text
-seed 1: PASS
-seed 2: PASS
-seed 3: PASS
-seed 4: PASS
-seed 5: PASS
-seed 6: PASS
-seed 7: PASS
-seed 8: PASS
-seed 9: PASS
-seed 10: PASS
-seed 11: PASS
-seed 12: FAIL (bug triggered!)
-seed 13: PASS
-seed 14: PASS
-seed 15: PASS
-```
-
-### 2. Deterministically Reproducing the Failure
-
-Once a failing seed is found (such as `--seed 12 --jitter 15ms`), re-running with the same `--seed` and `--jitter` reproduces the exact same execution schedule, leader election, and log truncation failure every time:
-
-```bash
-./target/debug/ptrace --seed 12 --jitter 15ms ./example/raft-example
+nodice --iterations 15 ./example/raft-example
 ```
 
 Output:
@@ -150,13 +94,24 @@ Cluster State Summary:
 INVARIANT VIOLATION (Committed Log Truncation Race): Leader node 2 committed 4 entries [1:SET k=1@t1, 2:SET k=2@t1, 3:SET k=3@t1, 4:SET k=4@t1], but follower node 0 has truncated log [1:SET k=1@t1, 2:SET k=2@t1, 3:SET k=3@t1] (commitIndex=3, lastApplied=3)!
   -> Cause: Out-of-order AppendEntries RPCs caused an older RPC with fewer entries to overwrite
      a newer RPC's entries on node 0 after the leader had already advanced matchIndex.
+
+Failed on iteration 3/15 (seed 3, jitter 3ms). Reproduce with:
+  nodice --seed 3 --jitter 3ms ./example/raft-example
 ```
 
----
+### 2. Replay the Failing Run
 
-## How to Fix the Bug
+Run the printed reproduction command to replay that exact failure:
 
-To comply with Figure 2 of the Raft paper (AppendEntries receiver rules 3 & 4), `handleAppendEntries` in [`raft.go`](./raft.go) must iterate through `args.Entries` and only truncate `n.log` if an existing entry at the same index has a **conflicting term**, while preserving any existing suffix if the incoming `AppendEntries` is merely a shorter prefix from the same term:
+```bash
+nodice --seed 3 --jitter 3ms ./example/raft-example
+```
+
+Every run with `--seed 3 --jitter 3ms` elects the same leader, delivers the RPCs in the same order, and triggers the same truncation on `node 0`.
+
+## Fixing the Bug
+
+Following Figure 2 of the Raft paper (`AppendEntries` receiver rules 3 and 4), [`handleAppendEntries`](./raft.go) should only truncate the log when an existing entry at the same index has a conflicting term:
 
 ```go
 for i, entry := range args.Entries {
