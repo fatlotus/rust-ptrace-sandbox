@@ -23,6 +23,7 @@ struct ChildState<Fd> {
     fd_map: Arc<Mutex<HashMap<c_int, Fd>>>,
     pending_child_handler: Option<Box<dyn Linux<Fd> + Send>>,
     pending_clone_files: bool,
+    exit_code: Option<i32>,
 }
 
 pub fn run_with_interceptor<Fd, L>(cmd: &str, args: &[&str], handler: L)
@@ -184,6 +185,7 @@ where
         fd_map,
         pending_child_handler: None,
         pending_clone_files: false,
+        exit_code: None,
     };
 
     if ptrace::syscall(pid, None).is_err() {
@@ -207,6 +209,13 @@ where
                         } else {
                             let proc = crate::captured::CapturedProcess::new(pid);
                             handler.on_exit(&proc);
+                            if is_initial {
+                                if let Some(code) = state.exit_code {
+                                    if code != 0 {
+                                        std::process::exit(code);
+                                    }
+                                }
+                            }
                             break;
                         }
                     } else {
@@ -267,16 +276,21 @@ where
                 let _ = ptrace::syscall(pid, None);
             }
             WaitStatus::Exited(_, status) => {
-                println!("Child {} exited with status {}", pid, status);
+                if handler.is_verbose() {
+                    println!("Child {} exited with status {}", pid, status);
+                }
                 let proc = crate::captured::CapturedProcess::new(pid);
                 handler.on_exit(&proc);
-                if is_initial && status != 0 {
-                    std::process::exit(status);
+                let code = state.exit_code.unwrap_or(status);
+                if is_initial && code != 0 {
+                    std::process::exit(code);
                 }
                 break;
             }
             WaitStatus::Signaled(_, sig, _) => {
-                println!("Child {} signaled with {}", pid, sig);
+                if handler.is_verbose() {
+                    println!("Child {} signaled with {}", pid, sig);
+                }
                 let proc = crate::captured::CapturedProcess::new(pid);
                 handler.on_exit(&proc);
                 if is_initial {
@@ -297,7 +311,12 @@ where
                     handler.on_exit(&proc);
                     std::process::exit(128 + sig as i32);
                 }
-                let _ = ptrace::syscall(pid, None);
+                let forward_sig = if sig == nix::sys::signal::Signal::SIGTRAP || sig == nix::sys::signal::Signal::SIGSTOP {
+                    None
+                } else {
+                    Some(sig)
+                };
+                let _ = ptrace::syscall(pid, forward_sig);
             }
             _other => {
                 let _ = ptrace::syscall(pid, None);
@@ -560,11 +579,13 @@ where
         }
         Some(Sysno::exit) => {
             let status = regs.rdi as i32;
+            state.exit_code = Some(status);
             let _ = handler.exit(&proc, status);
             Some(0)
         }
         Some(Sysno::exit_group) => {
             let status = regs.rdi as i32;
+            state.exit_code = Some(status);
             let _ = handler.exit_group(&proc, status);
             Some(0)
         }

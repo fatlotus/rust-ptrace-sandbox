@@ -185,6 +185,19 @@ impl TimeManager {
         inner.active_threads += 1;
     }
 
+    pub fn enter_blocking(&self) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.blocked_threads += 1;
+        Self::maybe_advance_clock_locked(&mut inner, &self.condvar);
+    }
+
+    pub fn exit_blocking(&self) {
+        let mut inner = self.inner.lock().unwrap();
+        if inner.blocked_threads > 0 {
+            inner.blocked_threads -= 1;
+        }
+    }
+
     pub fn sleep(&self, proc: &CapturedProcess, dur: Duration) -> nix::Result<()> {
         let mut inner = self.inner.lock().unwrap();
         let waiter_id = inner.next_waiter_id;
@@ -294,42 +307,49 @@ impl TimeManager {
         uaddr: u64,
         val: u32,
         timeout: Option<Duration>,
+        is_abstime: bool,
     ) -> nix::Result<c_int> {
-        let waiter_id;
-        {
-            let mut inner = self.inner.lock().unwrap();
-            waiter_id = inner.next_waiter_id;
-            inner.next_waiter_id += 1;
-            inner.futex_waiters.entry(uaddr).or_default().push(waiter_id);
-            inner.waiters.insert(waiter_id, WaiterStatus::Waiting);
-            inner.blocked_threads += 1;
+        let mut inner = self.inner.lock().unwrap();
 
-            if let Some(dur) = timeout {
-                let target_time = inner.current_time + dur;
-                inner.timers.push(TimerEvent {
-                    target_time,
-                    waiter_id,
-                });
-            }
-
-            Self::maybe_advance_clock_locked(&mut inner, &self.condvar);
-        }
-
-        // Read current value from guest memory to check if value matches
+        // Read current value from guest memory before registering waiter or advancing clock
         let bytes = proc.read_memory(uaddr as usize, 4);
         if bytes.len() < 4 {
-            let mut inner = self.inner.lock().unwrap();
-            self.cleanup_waiter(&mut inner, uaddr, waiter_id);
             return Err(nix::Error::EFAULT);
         }
         let current_val = u32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
         if current_val != val {
-            let mut inner = self.inner.lock().unwrap();
-            self.cleanup_waiter(&mut inner, uaddr, waiter_id);
             return Err(nix::Error::EAGAIN);
         }
 
-        let mut inner = self.inner.lock().unwrap();
+        if let Some(dur) = timeout {
+            if is_abstime && dur <= inner.current_time {
+                return Err(nix::Error::ETIMEDOUT);
+            }
+            if !is_abstime && dur.is_zero() {
+                return Err(nix::Error::ETIMEDOUT);
+            }
+        }
+
+        let waiter_id = inner.next_waiter_id;
+        inner.next_waiter_id += 1;
+        inner.futex_waiters.entry(uaddr).or_default().push(waiter_id);
+        inner.waiters.insert(waiter_id, WaiterStatus::Waiting);
+        inner.blocked_threads += 1;
+
+        if let Some(dur) = timeout {
+            let target_time = if is_abstime {
+                dur
+            } else {
+                inner.current_time + dur
+            };
+            inner.timers.push(TimerEvent {
+                target_time,
+                waiter_id,
+            });
+        }
+
+        Self::maybe_advance_clock_locked(&mut inner, &self.condvar);
+
         while inner.waiters.get(&waiter_id) == Some(&WaiterStatus::Waiting) {
             if !proc.is_alive() {
                 self.cleanup_waiter(&mut inner, uaddr, waiter_id);
@@ -870,7 +890,9 @@ impl Linux<DeterministicFd> for Deterministic {
                     }
 
                     // Wait for data with timeout
+                    self.time_manager.enter_blocking();
                     let (new_inner, timeout_res) = self.network.condvar.wait_timeout(inner, std::time::Duration::from_millis(100)).unwrap();
+                    self.time_manager.exit_blocking();
                     inner = new_inner;
                     if timeout_res.timed_out() && !proc.is_alive() {
                         return Err(nix::Error::ESRCH);
@@ -1057,7 +1079,9 @@ impl Linux<DeterministicFd> for Deterministic {
             } else {
                 100
             };
+            self.time_manager.enter_blocking();
             let (_new_inner, timeout_res) = self.network.condvar.wait_timeout(inner, std::time::Duration::from_millis(wait_slice)).unwrap();
+            self.time_manager.exit_blocking();
             if timeout_res.timed_out() {
                 waited_ms += wait_slice as i64;
                 if !proc.is_alive() {
@@ -1369,6 +1393,10 @@ impl Linux<DeterministicFd> for Deterministic {
             }
             self.skip_syscall(proc);
 
+            if futex_op == libc::FUTEX_WAIT_BITSET && val3 == 0 {
+                return Err(nix::Error::EINVAL);
+            }
+
             let timeout_dur = if !timeout.is_null() {
                 let bytes = proc.read_memory(timeout as usize, 16);
                 if bytes.len() < 16 {
@@ -1384,7 +1412,8 @@ impl Linux<DeterministicFd> for Deterministic {
                 None
             };
 
-            self.time_manager.futex_wait(proc, uaddr as u64, val, timeout_dur)
+            let is_abstime = futex_op == libc::FUTEX_WAIT_BITSET;
+            self.time_manager.futex_wait(proc, uaddr as u64, val, timeout_dur, is_abstime)
         } else if futex_op == libc::FUTEX_WAKE || futex_op == libc::FUTEX_WAKE_BITSET {
             if self.passthru.verbose {
                 println!("futex({:?}, {}, {}, ...) (VIRTUAL)", uaddr, if futex_op == libc::FUTEX_WAKE { "FUTEX_WAKE" } else { "FUTEX_WAKE_BITSET" }, val);
@@ -1563,7 +1592,9 @@ impl Deterministic {
             }
 
             // Wait for data with timeout
+            self.time_manager.enter_blocking();
             let (new_inner, timeout_res) = self.network.condvar.wait_timeout(inner, std::time::Duration::from_millis(100)).unwrap();
+            self.time_manager.exit_blocking();
             inner = new_inner;
             if timeout_res.timed_out() && !proc.is_alive() {
                 return Err(nix::Error::ESRCH);

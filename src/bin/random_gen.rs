@@ -84,5 +84,30 @@ fn main() {
             let tscp = core::arch::x86_64::__rdtscp(&mut aux);
             println!("Rdtsc: tsc={} tscp={} aux={}", tsc, tscp, aux);
         }
+
+        // Verify FUTEX_WAIT with mismatched value (EAGAIN) does not advance virtual time
+        let fword: u32 = 10;
+        let ts_rel = libc::timespec { tv_sec: 100, tv_nsec: 0 };
+        let r_eagain = libc::syscall(
+            libc::SYS_futex,
+            &fword as *const u32,
+            libc::FUTEX_WAIT,
+            999u32,
+            &ts_rel as *const libc::timespec,
+            std::ptr::null::<u32>(),
+            0u32,
+        );
+        let t_after = libc::syscall(libc::SYS_time, std::ptr::null_mut::<libc::time_t>());
+        let ts_abs = libc::timespec { tv_sec: 1, tv_nsec: 0 };
+        let r_bitset = libc::syscall(
+            libc::SYS_futex,
+            &fword as *const u32,
+            libc::FUTEX_WAIT_BITSET,
+            10u32,
+            &ts_abs as *const libc::timespec,
+            std::ptr::null::<u32>(),
+            u32::MAX,
+        );
+        println!("FutexCheck: eagain={} bitset={} time_after={}", r_eagain, r_bitset, t_after);
     }
 }

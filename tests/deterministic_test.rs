@@ -83,6 +83,18 @@ fn do_test_random_gen_deterministic() {
     let tsc2 = stdout2.lines().find(|l| l.contains("Rdtsc:")).unwrap();
     assert_eq!(tsc1, tsc2);
     assert!(tsc1.ends_with("aux=0"));
+
+    let fcheck1 = stdout1.lines().find(|l| l.contains("FutexCheck:")).unwrap();
+    assert_eq!(fcheck1, "FutexCheck: eagain=-1 bitset=-1 time_after=946684800");
+
+    let false_out = Command::new(ptrace_bin)
+        .arg("--sandbox")
+        .arg("/bin/sh")
+        .arg("-c")
+        .arg("exit 42")
+        .output()
+        .expect("Failed to execute ptrace bin");
+    assert_eq!(false_out.status.code(), Some(42));
 }
 
 fn do_test_random_gen_nondeterministic() {

@@ -44,8 +44,9 @@ impl CapturedProcess {
         regs.r9 = arg6;
         self.set_regs(regs)?;
         
+        let mut pending_sig = None;
         loop {
-            ptrace::syscall(self.pid, None)?;
+            ptrace::syscall(self.pid, pending_sig.take())?;
             let status = waitpid(self.pid, None)?;
             match status {
                 nix::sys::wait::WaitStatus::Exited(_, _) | nix::sys::wait::WaitStatus::Signaled(_, _, _) => {
@@ -60,8 +61,8 @@ impl CapturedProcess {
                         // Probably another Ptrace event or just a trap, continue
                         continue;
                     }
-                    // If it's another signal, we need to pass it to the child and continue waiting for syscall exit
-                    ptrace::syscall(self.pid, Some(sig))?;
+                    // If it's another signal, pass it to the child on the next iteration
+                    pending_sig = Some(sig);
                 }
                 _ => {
                     // Unexpected status, try to continue
@@ -97,8 +98,9 @@ impl CapturedProcess {
         regs.rax = u64::MAX;
         self.set_regs(regs)?;
         
+        let mut pending_sig = None;
         loop {
-            ptrace::syscall(self.pid, None)?;
+            ptrace::syscall(self.pid, pending_sig.take())?;
             let status = waitpid(self.pid, None)?;
             match status {
                 nix::sys::wait::WaitStatus::Exited(_, _) | nix::sys::wait::WaitStatus::Signaled(_, _, _) => {
@@ -111,7 +113,7 @@ impl CapturedProcess {
                     if sig == nix::sys::signal::Signal::SIGTRAP {
                         continue;
                     }
-                    ptrace::syscall(self.pid, Some(sig))?;
+                    pending_sig = Some(sig);
                 }
                 _ => continue,
             }
