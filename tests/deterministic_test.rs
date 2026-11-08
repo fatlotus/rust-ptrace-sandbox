@@ -42,6 +42,9 @@ fn do_test_random_gen_deterministic() {
     let uname2 = stdout2.lines().find(|l| l.contains("Uname:")).unwrap();
     assert_eq!(uname1, uname2);
     assert!(uname1.contains("nodename=sandbox"));
+
+    let faults1 = stdout1.lines().find(|l| l.contains("Faults:")).unwrap();
+    assert_eq!(faults1, "Faults: getrandom=-1 nanosleep=-1");
 }
 
 fn do_test_random_gen_nondeterministic() {

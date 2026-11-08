@@ -23,5 +23,9 @@ fn main() {
             let release = CStr::from_ptr(uts.release.as_ptr()).to_string_lossy();
             println!("Uname: nodename={} release={}", nodename, release);
         }
+
+        let bad_rand = libc::syscall(libc::SYS_getrandom, std::ptr::null_mut::<u8>(), usize::MAX, 0);
+        let bad_sleep = libc::syscall(libc::SYS_nanosleep, std::ptr::null::<libc::timespec>(), std::ptr::null_mut::<libc::timespec>());
+        println!("Faults: getrandom={} nanosleep={}", bad_rand, bad_sleep);
     }
 }

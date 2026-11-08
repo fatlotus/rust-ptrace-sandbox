@@ -118,10 +118,15 @@ impl CapturedProcess {
     }
 
     pub fn read_memory(&self, addr: usize, count: usize) -> Vec<u8> {
-        let mut data = Vec::with_capacity(count);
+        let mut data = Vec::with_capacity(std::cmp::min(count, 65536));
         let mut read = 0;
         while read < count {
-            let word = ptrace::read(self.pid, (addr + read) as *mut _).unwrap_or(0);
+            let Some(cur_addr) = addr.checked_add(read) else {
+                break;
+            };
+            let Ok(word) = ptrace::read(self.pid, cur_addr as *mut _) else {
+                break;
+            };
             let to_copy = std::cmp::min(count - read, std::mem::size_of::<libc::c_long>());
             let bytes: [u8; 8] = word.to_ne_bytes();
             data.extend_from_slice(&bytes[..to_copy]);

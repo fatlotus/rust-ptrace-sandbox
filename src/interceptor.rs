@@ -166,7 +166,8 @@ where
                   ptrace::Options::PTRACE_O_TRACEFORK |
                   ptrace::Options::PTRACE_O_TRACEVFORK |
                   ptrace::Options::PTRACE_O_TRACECLONE |
-                  ptrace::Options::PTRACE_O_TRACEEXEC;
+                  ptrace::Options::PTRACE_O_TRACEEXEC |
+                  ptrace::Options::PTRACE_O_EXITKILL;
     if ptrace::setoptions(pid, options).is_err() {
         handler.on_exit(&crate::captured::CapturedProcess::new(pid));
         return;
@@ -837,7 +838,12 @@ where
             let buf_addr = regs.rdi as usize;
             let count = regs.rsi as usize;
             let flags = regs.rdx as i32;
-            let mut buf = vec![0u8; count];
+            if count > 0 && (buf_addr == 0 || ptrace::read(pid, (buf_addr & !7) as *mut _).is_err()) {
+                let _ = proc.skip_syscall();
+                return Some(-libc::EFAULT as i64);
+            }
+            let capped_count = std::cmp::min(count, 65536);
+            let mut buf = vec![0u8; capped_count];
             match handler.getrandom(&proc, &mut buf, flags) {
                 Ok(res) => {
                     write_bytes(pid, buf_addr, &buf[..res]);
