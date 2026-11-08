@@ -165,3 +165,75 @@ fn cli_flags_and_missing_command_error() {
     assert!(!stderr.contains("panicked at"));
 }
 
+#[test]
+fn cli_iterations_pass_and_failure_repro() {
+    let nodice_bin = env!("CARGO_BIN_EXE_nodice");
+
+    // 1. Passing iterations exit with 0 and hide all output from successful runs
+    let out = std::process::Command::new(nodice_bin)
+        .args(["--iterations", "6", "/bin/echo", "ok"])
+        .output()
+        .expect("Failed to run nodice with --iterations");
+    assert!(out.status.success());
+    assert!(out.stdout.is_empty(), "Expected no stdout on passing runs");
+    assert!(out.stderr.is_empty(), "Expected no stderr on passing runs");
+
+    let shell = if std::path::Path::new("/bin/sh").exists() {
+        "/bin/sh"
+    } else {
+        "/bin/bash"
+    };
+
+    // Determine the first 4 hex bytes of /dev/urandom under seed 4 when invoked via shell
+    let seed4_out = std::process::Command::new(nodice_bin)
+        .args(["--seed", "4", shell, "-c", "od -An -tx1 -N4 /dev/urandom"])
+        .output()
+        .expect("Failed to probe seed 4 urandom");
+    let seed4_hex = String::from_utf8_lossy(&seed4_out.stdout)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(!seed4_hex.is_empty());
+
+    // 2. When --jitter is omitted, jitter starts at 1ms and increases with each iteration (4ms on iteration 4).
+    // Passing iterations must have their output hidden.
+    let script = format!(
+        "val=$(od -An -tx1 -N4 /dev/urandom); \
+         set -- $val; \
+         if [ \"$1 $2 $3 $4\" = \"{}\" ]; then echo matched_seed_4; exit 7; fi; \
+         echo passing_iteration_output",
+        seed4_hex
+    );
+    let out = std::process::Command::new(nodice_bin)
+        .args(["--iterations", "6", shell, "-c", &script])
+        .output()
+        .expect("Failed to run nodice with --iterations");
+    assert_eq!(out.status.code(), Some(7));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stdout.contains("matched_seed_4"));
+    assert!(
+        !stdout.contains("passing_iteration_output"),
+        "Expected output from successful iterations to be hidden, got:\n{}",
+        stdout
+    );
+    assert!(
+        stderr.contains("--seed 4 --jitter 4ms"),
+        "Expected stderr to contain '--seed 4 --jitter 4ms', got:\n{}",
+        stderr
+    );
+
+    // 3. When --jitter is explicitly specified alongside --iterations, that jitter is used
+    let out = std::process::Command::new(nodice_bin)
+        .args(["--iterations=6", "--jitter=15ms", shell, "-c", &script])
+        .output()
+        .expect("Failed to run nodice with --iterations and --jitter");
+    assert_eq!(out.status.code(), Some(7));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("--seed 4 --jitter 15ms"),
+        "Expected stderr to contain '--seed 4 --jitter 15ms', got:\n{}",
+        stderr
+    );
+}
+
