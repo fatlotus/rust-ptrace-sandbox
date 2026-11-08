@@ -82,10 +82,62 @@ fn do_test_random_gen_deterministic() {
     let tsc1 = stdout1.lines().find(|l| l.contains("Rdtsc:")).unwrap();
     let tsc2 = stdout2.lines().find(|l| l.contains("Rdtsc:")).unwrap();
     assert_eq!(tsc1, tsc2);
-    assert!(tsc1.ends_with("aux=0"));
+    assert!(tsc1.ends_with("aux=0 mono=true"));
 
     let fcheck1 = stdout1.lines().find(|l| l.contains("FutexCheck:")).unwrap();
     assert_eq!(fcheck1, "FutexCheck: eagain=-1 bitset=-1 time_after=946684800");
+
+    let ralias1 = stdout1.lines().find(|l| l.contains("RandomAliases:")).unwrap();
+    let ralias2 = stdout2.lines().find(|l| l.contains("RandomAliases:")).unwrap();
+    assert_eq!(ralias1, ralias2);
+    assert_eq!(
+        ralias1,
+        "RandomAliases: alias=[66, 66, 66, 66] readv=4(66) uuid=42424242-4242-4242-4242-424242424242"
+    );
+
+    let sysids1 = stdout1.lines().find(|l| l.contains("SysIds:")).unwrap();
+    let sysids2 = stdout2.lines().find(|l| l.contains("SysIds:")).unwrap();
+    assert_eq!(sysids1, sysids2);
+    assert_eq!(sysids1, "SysIds: adj=0:946684800 ru=0:0 cpu=0:0:0 pgid=1 sid=1");
+
+    let proc1 = stdout1.lines().find(|l| l.contains("ProcCheck:")).unwrap();
+    let proc2 = stdout2.lines().find(|l| l.contains("ProcCheck:")).unwrap();
+    assert_eq!(proc1, proc2);
+    assert_eq!(proc1, "ProcCheck: cpid=1235 wpid=1235 raise=0 usr1=1");
+
+    let page1 = stdout1.lines().find(|l| l.contains("PageBoundary:")).unwrap();
+    let page2 = stdout2.lines().find(|l| l.contains("PageBoundary:")).unwrap();
+    assert_eq!(page1, page2);
+    assert_eq!(page1, "PageBoundary: gr=5 bytes=[66, 66, 66, 66, 66]");
+
+    let sock1 = stdout1.lines().find(|l| l.contains("SockCheck:")).unwrap();
+    let sock2 = stdout2.lines().find(|l| l.contains("SockCheck:")).unwrap();
+    assert_eq!(sock1, sock2);
+    assert_eq!(
+        sock1,
+        "SockCheck: sp=0:2:2 eagain=-1 conn=0 tiny_len=16 sentinel=0xaa fstatat=0:49152"
+    );
+
+    // Ensure full output is 100% identical across runs
+    assert_eq!(stdout1, stdout2);
+}
+
+#[test]
+#[ntest::timeout(1000)]
+fn test_shell_sleep_and_exit_code() {
+    let ptrace_bin = env!("CARGO_BIN_EXE_ptrace");
+
+    // Verify `/bin/sh -c "/bin/sleep 1"` completes quickly via virtual time dilation even when parent blocks in wait4
+    let sleep_start = std::time::Instant::now();
+    let sh_sleep = Command::new(ptrace_bin)
+        .arg("--sandbox")
+        .arg("/bin/sh")
+        .arg("-c")
+        .arg("/bin/sleep 1")
+        .output()
+        .expect("Failed to execute sh sleep");
+    assert!(sh_sleep.status.success());
+    assert!(sleep_start.elapsed().as_millis() < 500);
 
     let false_out = Command::new(ptrace_bin)
         .arg("--sandbox")

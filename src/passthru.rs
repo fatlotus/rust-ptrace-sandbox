@@ -40,7 +40,7 @@ impl Linux<PassthruFd> for Passthru {
         PassthruFd(new_raw_fd)
     }
 
-    fn wrap_raw_fd(&mut self, raw_fd: c_int) -> PassthruFd {
+    fn wrap_raw_fd(&mut self, _proc: &CapturedProcess, raw_fd: c_int) -> PassthruFd {
         PassthruFd(raw_fd)
     }
 
@@ -451,11 +451,12 @@ impl Linux<PassthruFd> for Passthru {
         let regs = proc.get_regs()?;
         let res = proc.getrandom(regs.rdi, buf.len(), flags)?;
         let read_buf = proc.read_memory(regs.rdi as usize, res as usize);
-        buf[..res as usize].copy_from_slice(&read_buf);
+        let n = std::cmp::min(res as usize, read_buf.len());
+        buf[..n].copy_from_slice(&read_buf[..n]);
         if self.verbose {
-            println!("getrandom(..., {}, {}) = {}", buf.len(), flags, res);
+            println!("getrandom(..., {}, {}) = {}", buf.len(), flags, n);
         }
-        Ok(res as usize)
+        Ok(n)
     }
 
     fn gettimeofday(&mut self, proc: &CapturedProcess) -> nix::Result<c_int> {
@@ -538,6 +539,22 @@ impl Linux<PassthruFd> for Passthru {
         let res = proc.writev(fd.0, iov, iovcnt)?;
         if self.verbose {
             println!("writev({}, ..., {}) = {}", fd.0, iovcnt, res);
+        }
+        Ok(res as usize)
+    }
+
+    fn readv(&mut self, proc: &CapturedProcess, fd: &mut PassthruFd, iov: u64, iovcnt: i32) -> nix::Result<usize> {
+        let res = proc.syscall(libc::SYS_readv as u64, fd.0 as u64, iov, iovcnt as u64, 0, 0, 0)?;
+        if self.verbose {
+            println!("readv({}, ..., {}) = {}", fd.0, iovcnt, res);
+        }
+        Ok(res as usize)
+    }
+
+    fn preadv(&mut self, proc: &CapturedProcess, fd: &mut PassthruFd, iov: u64, iovcnt: i32, offset: off_t) -> nix::Result<usize> {
+        let res = proc.syscall(libc::SYS_preadv as u64, fd.0 as u64, iov, iovcnt as u64, offset as u64, 0, 0)?;
+        if self.verbose {
+            println!("preadv({}, ..., {}, {}) = {}", fd.0, iovcnt, offset, res);
         }
         Ok(res as usize)
     }

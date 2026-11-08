@@ -23,6 +23,8 @@ struct ChildState<Fd> {
     fd_map: Arc<Mutex<HashMap<c_int, Fd>>>,
     pending_child_handler: Option<Box<dyn Linux<Fd> + Send>>,
     pending_clone_files: bool,
+    pending_parent_tidptr: Option<u64>,
+    pending_child_tidptr: Option<u64>,
     exit_code: Option<i32>,
 }
 
@@ -54,6 +56,8 @@ where
                 }
                 if handler.is_deterministic() {
                     libc::prctl(libc::PR_SET_TSC, libc::PR_TSC_SIGSEGV, 0, 0, 0);
+                    // Enable CPUID faulting (ARCH_SET_CPUID = 0x1012) if supported by the CPU/kernel
+                    let _ = libc::syscall(libc::SYS_arch_prctl, 0x1012, 0);
                 }
             }
 
@@ -103,10 +107,36 @@ where
     fd_map.insert(0, stdin);
     fd_map.insert(1, stdout);
     fd_map.insert(2, stderr);
-    tracee_loop(initial_child, handler, Arc::new(Mutex::new(fd_map)), true);
+    let child_threads: Arc<Mutex<Vec<std::thread::JoinHandle<()>>>> = Arc::new(Mutex::new(Vec::new()));
+    let exit_code = tracee_loop(
+        initial_child,
+        handler,
+        Arc::new(Mutex::new(fd_map)),
+        true,
+        child_threads.clone(),
+    );
+    loop {
+        let handle_opt = child_threads.lock().unwrap().pop();
+        if let Some(h) = handle_opt {
+            let _ = h.join();
+        } else {
+            break;
+        }
+    }
+    if let Some(code) = exit_code {
+        if code != 0 {
+            std::process::exit(code);
+        }
+    }
 }
 
-fn tracee_loop<Fd>(pid: Pid, mut handler: Box<dyn Linux<Fd> + Send>, fd_map: Arc<Mutex<HashMap<c_int, Fd>>>, is_initial: bool)
+fn tracee_loop<Fd>(
+    pid: Pid,
+    mut handler: Box<dyn Linux<Fd> + Send>,
+    fd_map: Arc<Mutex<HashMap<c_int, Fd>>>,
+    is_initial: bool,
+    child_threads: Arc<Mutex<Vec<std::thread::JoinHandle<()>>>>,
+) -> Option<i32>
 where
     Fd: Clone + Send + 'static + std::os::unix::io::AsRawFd,
 {
@@ -134,13 +164,13 @@ where
                 Err(e) => {
                     eprintln!("[{}] Failed to attach: {}", pid, e);
                     handler.on_exit(&crate::captured::CapturedProcess::new(pid));
-                    return;
+                    return None;
                 }
             }
         }
         if !attached {
             handler.on_exit(&crate::captured::CapturedProcess::new(pid));
-            return;
+            return None;
         }
         
         // Wait for the SIGSTOP from attach
@@ -154,7 +184,7 @@ where
                 Ok(status) => {
                     if let WaitStatus::Exited(_, _) | WaitStatus::Signaled(_, _, _) = status {
                         handler.on_exit(&crate::captured::CapturedProcess::new(pid));
-                        return;
+                        return None;
                     }
                     // For other signals, we might need to pass them through if we were the tracer,
                     // but here we are still trying to become the tracer.
@@ -162,7 +192,7 @@ where
                 }
                 Err(_) => {
                     handler.on_exit(&crate::captured::CapturedProcess::new(pid));
-                    return;
+                    return None;
                 }
             }
         }
@@ -176,21 +206,23 @@ where
                   ptrace::Options::PTRACE_O_EXITKILL;
     if ptrace::setoptions(pid, options).is_err() {
         handler.on_exit(&crate::captured::CapturedProcess::new(pid));
-        return;
+        return None;
     }
 
     let mut state = ChildState {
         in_syscall: false,
-        saved_result: 0,
+        saved_result: -123456,
         fd_map,
         pending_child_handler: None,
         pending_clone_files: false,
+        pending_parent_tidptr: None,
+        pending_child_tidptr: None,
         exit_code: None,
     };
 
     if ptrace::syscall(pid, None).is_err() {
         handler.on_exit(&crate::captured::CapturedProcess::new(pid));
-        return;
+        return None;
     }
 
     loop {
@@ -199,6 +231,7 @@ where
             WaitStatus::PtraceSyscall(_) => {
                 if !state.in_syscall {
                     // Syscall Entry
+                    state.saved_result = -123456;
                     if let Some(res) = handle_syscall_entry(pid, handler.as_mut(), &mut state) {
                         // The syscall was already executed inside handle_syscall_entry
                         // We are now at the exit stop (if still alive).
@@ -209,17 +242,9 @@ where
                         } else {
                             let proc = crate::captured::CapturedProcess::new(pid);
                             handler.on_exit(&proc);
-                            if is_initial {
-                                if let Some(code) = state.exit_code {
-                                    if code != 0 {
-                                        std::process::exit(code);
-                                    }
-                                }
-                            }
-                            break;
+                            return if is_initial { state.exit_code } else { None };
                         }
                     } else {
-                        state.saved_result = -123456; // Sentinel for "did not replace"
                         state.in_syscall = true;
                     }
                 } else {
@@ -232,7 +257,10 @@ where
                             break;
                         }
                     }
+                    state.saved_result = -123456;
                     state.pending_child_handler = None;
+                    state.pending_parent_tidptr = None;
+                    state.pending_child_tidptr = None;
                     state.in_syscall = false;
                 }
                 let _ = ptrace::syscall(pid, None);
@@ -248,11 +276,21 @@ where
                     // We must wait for it to stop before we can detach.
                     let _ = waitpid(new_pid, None);
 
+                    let parent_proc = crate::captured::CapturedProcess::new(pid);
+                    if let Some(det_pid) = handler.on_child_created(
+                        &parent_proc,
+                        new_pid,
+                        state.pending_parent_tidptr.take(),
+                        state.pending_child_tidptr.take(),
+                    ) {
+                        state.saved_result = det_pid;
+                    }
+
                     // Handover: detach from this thread so another can attach.
                     let _ = ptrace::detach(new_pid, Some(nix::sys::signal::Signal::SIGSTOP));
 
                     let mut child_handler = state.pending_child_handler.take().expect("No pending handler for fork");
-                    child_handler.on_start();
+                    child_handler.on_start(new_pid);
                     let child_fd_map = if state.pending_clone_files {
                         state.fd_map.clone()
                     } else {
@@ -264,10 +302,28 @@ where
                         }
                         Arc::new(Mutex::new(new_map))
                     };
-                    std::thread::spawn(move || {
-                        tracee_loop(new_pid, child_handler, child_fd_map, false);
+                    let threads_clone = child_threads.clone();
+                    let handle = std::thread::spawn(move || {
+                        let _ = tracee_loop(new_pid, child_handler, child_fd_map, false, threads_clone);
                     });
+                    child_threads.lock().unwrap().push(handle);
                 } else if event == ptrace::Event::PTRACE_EVENT_EXEC as i32 {
+                    // Prune any file descriptors closed by the kernel due to O_CLOEXEC
+                    let mut closed_fds = Vec::new();
+                    {
+                        let mut map = state.fd_map.lock().unwrap();
+                        map.retain(|_, fd_obj| {
+                            let raw = fd_obj.as_raw_fd();
+                            let exists = std::fs::metadata(format!("/proc/{}/fd/{}", pid.as_raw(), raw)).is_ok();
+                            if !exists {
+                                closed_fds.push(fd_obj.clone());
+                            }
+                            exists
+                        });
+                    }
+                    for fd_obj in closed_fds {
+                        handler.on_fd_overwritten(fd_obj);
+                    }
                     if let Ok(regs) = ptrace::getregs(pid) {
                         vdso::disable_vdso(pid, regs.rsp);
                         handler.on_exec(&crate::captured::CapturedProcess::new(pid), regs.rsp);
@@ -282,10 +338,7 @@ where
                 let proc = crate::captured::CapturedProcess::new(pid);
                 handler.on_exit(&proc);
                 let code = state.exit_code.unwrap_or(status);
-                if is_initial && code != 0 {
-                    std::process::exit(code);
-                }
-                break;
+                return if is_initial { Some(code) } else { None };
             }
             WaitStatus::Signaled(_, sig, _) => {
                 if handler.is_verbose() {
@@ -293,10 +346,7 @@ where
                 }
                 let proc = crate::captured::CapturedProcess::new(pid);
                 handler.on_exit(&proc);
-                if is_initial {
-                    std::process::exit(128 + sig as i32);
-                }
-                break;
+                return if is_initial { Some(128 + sig as i32) } else { None };
             }
             WaitStatus::Stopped(_, sig) => {
                 if sig == nix::sys::signal::Signal::SIGSEGV {
@@ -305,11 +355,6 @@ where
                         let _ = ptrace::syscall(pid, None);
                         continue;
                     }
-                }
-                if sig == nix::sys::signal::Signal::SIGSEGV || sig == nix::sys::signal::Signal::SIGBUS || sig == nix::sys::signal::Signal::SIGILL || sig == nix::sys::signal::Signal::SIGABRT {
-                    let proc = crate::captured::CapturedProcess::new(pid);
-                    handler.on_exit(&proc);
-                    std::process::exit(128 + sig as i32);
                 }
                 let forward_sig = if sig == nix::sys::signal::Signal::SIGTRAP || sig == nix::sys::signal::Signal::SIGSTOP {
                     None
@@ -323,6 +368,7 @@ where
             }
         }
     }
+    None
 }
 
 
@@ -337,16 +383,19 @@ where
 
     match sysno {
         Some(Sysno::read) => {
-            if let Some(mut fd) = get_fd(state, regs.rdi as i32) {
+            let guest_fd = regs.rdi as i32;
+            if let Some(mut fd) = get_fd(state, guest_fd) {
                 let addr = regs.rsi as usize;
                 let count = regs.rdx as usize;
-                match handler.read(&proc, &mut fd, count) {
+                let res = match handler.read(&proc, &mut fd, count) {
                     Ok(buf) => {
-                        write_bytes(pid, addr, &buf);
+                        proc.write_memory(addr, &buf);
                         Some(buf.len() as i64)
                     }
                     Err(err) => Some(-(err as i32) as i64),
-                }
+                };
+                update_fd(state, guest_fd, fd);
+                res
             } else {
                 ebadf(&proc)
             }
@@ -369,6 +418,16 @@ where
             let flags = regs.rsi as i32;
             let mode = regs.rdx as libc::mode_t;
             let pathname = read_string(pid, addr);
+            match handler.open(&proc, &pathname, flags, mode) {
+                Ok(res) => Some(register_fd(state, res) as i64),
+                Err(err) => Some(-(err as i32) as i64),
+            }
+        }
+        Some(Sysno::creat) => {
+            let addr = regs.rdi as usize;
+            let mode = regs.rsi as libc::mode_t;
+            let pathname = read_string(pid, addr);
+            let flags = libc::O_CREAT | libc::O_WRONLY | libc::O_TRUNC;
             match handler.open(&proc, &pathname, flags, mode) {
                 Ok(res) => Some(register_fd(state, res) as i64),
                 Err(err) => Some(-(err as i32) as i64),
@@ -461,8 +520,8 @@ where
                     if bytes.len() == 8 {
                         let rfd = i32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
                         let wfd = i32::from_ne_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
-                        let r_entry = handler.wrap_raw_fd(rfd);
-                        let w_entry = handler.wrap_raw_fd(wfd);
+                        let r_entry = handler.wrap_raw_fd(&proc, rfd);
+                        let w_entry = handler.wrap_raw_fd(&proc, wfd);
                         let mut map = state.fd_map.lock().unwrap();
                         map.insert(rfd, r_entry);
                         map.insert(wfd, w_entry);
@@ -470,6 +529,47 @@ where
                     Some(0)
                 }
                 Ok(other) => Some(other),
+                Err(err) => Some(-(err as i32) as i64),
+            }
+        }
+        Some(Sysno::socketpair) => {
+            let sv_addr = regs.r10 as usize;
+            match proc.syscall(libc::SYS_socketpair as u64, regs.rdi, regs.rsi, regs.rdx, regs.r10, 0, 0) {
+                Ok(0) => {
+                    let bytes = proc.read_memory(sv_addr, 8);
+                    if bytes.len() == 8 {
+                        let fd0 = i32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+                        let fd1 = i32::from_ne_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
+                        let entry0 = handler.wrap_raw_fd(&proc, fd0);
+                        let entry1 = handler.wrap_raw_fd(&proc, fd1);
+                        let mut map = state.fd_map.lock().unwrap();
+                        map.insert(fd0, entry0);
+                        map.insert(fd1, entry1);
+                    }
+                    Some(0)
+                }
+                Ok(other) => Some(other),
+                Err(err) => Some(-(err as i32) as i64),
+            }
+        }
+        Some(Sysno::memfd_create)
+        | Some(Sysno::eventfd)
+        | Some(Sysno::eventfd2)
+        | Some(Sysno::epoll_create)
+        | Some(Sysno::epoll_create1)
+        | Some(Sysno::timerfd_create)
+        | Some(Sysno::signalfd)
+        | Some(Sysno::signalfd4)
+        | Some(Sysno::inotify_init)
+        | Some(Sysno::inotify_init1) => {
+            match proc.syscall(syscall_no, regs.rdi, regs.rsi, regs.rdx, regs.r10, regs.r8, regs.r9) {
+                Ok(res) => {
+                    if res >= 0 {
+                        let fd_entry = handler.wrap_raw_fd(&proc, res as c_int);
+                        register_fd(state, fd_entry);
+                    }
+                    Some(res)
+                }
                 Err(err) => Some(-(err as i32) as i64),
             }
         }
@@ -548,6 +648,43 @@ where
                 Err(err) => Some(-(err as i32) as i64),
             }
         }
+        Some(Sysno::openat2) => {
+            let raw_dirfd = regs.rdi as i32;
+            let addr = regs.rsi as usize;
+            let how_addr = regs.rdx as usize;
+            let how_size = regs.r10 as usize;
+            let pathname = read_string(pid, addr);
+            let mut dirfd_opt = get_fd(state, raw_dirfd);
+            if raw_dirfd != libc::AT_FDCWD && !pathname.starts_with('/') && dirfd_opt.is_none() {
+                return ebadf(&proc);
+            }
+            let how_bytes = proc.read_memory(how_addr, std::cmp::min(how_size, 24));
+            if how_bytes.len() < 24 {
+                let _ = proc.skip_syscall();
+                return Some(-libc::EFAULT as i64);
+            }
+            let flags = u64::from_ne_bytes(how_bytes[0..8].try_into().unwrap()) as c_int;
+            let mode = u64::from_ne_bytes(how_bytes[8..16].try_into().unwrap()) as libc::mode_t;
+            let resolve = u64::from_ne_bytes(how_bytes[16..24].try_into().unwrap());
+            if resolve == 0 {
+                match handler.openat(&proc, dirfd_opt.as_mut(), &pathname, flags, mode) {
+                    Ok(res) => Some(register_fd(state, res) as i64),
+                    Err(err) => Some(-(err as i32) as i64),
+                }
+            } else {
+                let actual_dirfd = dirfd_opt.as_ref().map(|d| d.as_raw_fd()).unwrap_or(libc::AT_FDCWD);
+                match proc.syscall(libc::SYS_openat2 as u64, actual_dirfd as i64 as u64, regs.rsi, regs.rdx, regs.r10, 0, 0) {
+                    Ok(res) => {
+                        if res >= 0 {
+                            let fd_entry = handler.wrap_raw_fd(&proc, res as c_int);
+                            register_fd(state, fd_entry);
+                        }
+                        Some(res)
+                    }
+                    Err(err) => Some(-(err as i32) as i64),
+                }
+            }
+        }
         Some(Sysno::newfstatat) => {
             let raw_dirfd = regs.rdi as i32;
             let addr = regs.rsi as usize;
@@ -594,6 +731,8 @@ where
                 Ok((_, child_handler)) => {
                     state.pending_child_handler = Some(child_handler);
                     state.pending_clone_files = false;
+                    state.pending_parent_tidptr = None;
+                    state.pending_child_tidptr = None;
                     None
                 }
                 Err(err) => Some(-(err as i32) as i64),
@@ -604,6 +743,8 @@ where
                 Ok((_, child_handler)) => {
                     state.pending_child_handler = Some(child_handler);
                     state.pending_clone_files = false;
+                    state.pending_parent_tidptr = None;
+                    state.pending_child_tidptr = None;
                     None
                 }
                 Err(err) => Some(-(err as i32) as i64),
@@ -611,15 +752,27 @@ where
         }
         Some(Sysno::clone) => {
             let flags = regs.rdi as i32;
-            let child_tid = if (flags & libc::CLONE_CHILD_SETTID) != 0 || (flags & libc::CLONE_CHILD_CLEARTID) != 0 {
+            let parent_tid = if (flags & libc::CLONE_PARENT_SETTID) != 0 {
+                Some(regs.rdx as u64)
+            } else {
+                None
+            };
+            let child_settid = if (flags & libc::CLONE_CHILD_SETTID) != 0 {
+                Some(regs.r10 as u64)
+            } else {
+                None
+            };
+            let child_cleartid = if (flags & libc::CLONE_CHILD_CLEARTID) != 0 {
                 Some(regs.r10 as *mut c_int)
             } else {
                 None
             };
-            match handler.clone(&proc, flags, child_tid) {
+            match handler.clone(&proc, flags, child_cleartid) {
                 Ok((_, child_handler)) => {
                     state.pending_child_handler = Some(child_handler);
                     state.pending_clone_files = (flags & libc::CLONE_FILES) != 0;
+                    state.pending_parent_tidptr = parent_tid;
+                    state.pending_child_tidptr = child_settid;
                     None
                 }
                 Err(err) => Some(-(err as i32) as i64),
@@ -631,22 +784,35 @@ where
             let args_bytes = proc.read_memory(addr, std::cmp::min(size, 64)); // We only need the first few fields
             
             let mut flags = 0u64;
-            let mut child_tid = None;
+            let mut child_cleartid = None;
+            let mut child_settid = None;
+            let mut parent_tid = None;
             
             if args_bytes.len() >= 8 {
-                flags = u64::from_ne_bytes([args_bytes[0], args_bytes[1], args_bytes[2], args_bytes[3], args_bytes[4], args_bytes[5], args_bytes[6], args_bytes[7]]);
+                flags = u64::from_ne_bytes(args_bytes[0..8].try_into().unwrap());
             }
             if args_bytes.len() >= 24 {
-                let tid_addr = u64::from_ne_bytes([args_bytes[16], args_bytes[17], args_bytes[18], args_bytes[19], args_bytes[20], args_bytes[21], args_bytes[22], args_bytes[23]]);
-                if (flags & libc::CLONE_CHILD_SETTID as u64) != 0 || (flags & libc::CLONE_CHILD_CLEARTID as u64) != 0 {
-                    child_tid = Some(tid_addr as *mut c_int);
+                let tid_addr = u64::from_ne_bytes(args_bytes[16..24].try_into().unwrap());
+                if (flags & libc::CLONE_CHILD_CLEARTID as u64) != 0 {
+                    child_cleartid = Some(tid_addr as *mut c_int);
+                }
+                if (flags & libc::CLONE_CHILD_SETTID as u64) != 0 {
+                    child_settid = Some(tid_addr);
+                }
+            }
+            if args_bytes.len() >= 32 {
+                let ptid_addr = u64::from_ne_bytes(args_bytes[24..32].try_into().unwrap());
+                if (flags & libc::CLONE_PARENT_SETTID as u64) != 0 {
+                    parent_tid = Some(ptid_addr);
                 }
             }
 
-            match handler.clone(&proc, flags as i32, child_tid) {
+            match handler.clone(&proc, flags as i32, child_cleartid) {
                 Ok((_, child_handler)) => {
                     state.pending_child_handler = Some(child_handler);
                     state.pending_clone_files = (flags as i32 & libc::CLONE_FILES) != 0;
+                    state.pending_parent_tidptr = parent_tid;
+                    state.pending_child_tidptr = child_settid;
                     None
                 }
                 Err(err) => Some(-(err as i32) as i64),
@@ -754,7 +920,7 @@ where
                 let offset = regs.r10 as libc::off_t;
                 match handler.pread(&proc, &mut fd, count, offset) {
                     Ok(buf) => {
-                        write_bytes(pid, addr, &buf);
+                        proc.write_memory(addr, &buf);
                         Some(buf.len() as i64)
                     }
                     Err(err) => Some(-(err as i32) as i64),
@@ -771,7 +937,7 @@ where
             
             match handler.poll(&proc, &mut fds, timeout) {
                 Ok(res) => {
-                    write_pollfds_revents(pid, fds_addr, &fds);
+                    write_pollfds_revents(&proc, fds_addr, &fds);
                     Some(res as i64)
                 }
                 Err(err) => Some(-(err as i32) as i64),
@@ -802,7 +968,7 @@ where
                 let addrlen = regs.r9 as *mut libc::socklen_t;
                 match handler.recvfrom(&proc, &mut fd, len, flags, src_addr, addrlen) {
                     Ok(buf) => {
-                        write_bytes(pid, buf_addr, &buf);
+                        proc.write_memory(buf_addr, &buf);
                         Some(buf.len() as i64)
                     },
                     Err(err) => Some(-(err as i32) as i64),
@@ -812,10 +978,11 @@ where
             }
         }
         Some(Sysno::fcntl) => {
-            if let Some(mut fd) = get_fd(state, regs.rdi as i32) {
+            let guest_fd = regs.rdi as i32;
+            if let Some(mut fd) = get_fd(state, guest_fd) {
                 let cmd = regs.rsi as i32;
                 let arg = regs.rdx as libc::c_ulong;
-                match handler.fcntl(&proc, &mut fd, cmd, arg) {
+                let res = match handler.fcntl(&proc, &mut fd, cmd, arg) {
                     Ok(res) => {
                         if (cmd == libc::F_DUPFD || cmd == libc::F_DUPFD_CLOEXEC) && res >= 0 {
                             let duped = handler.dup_fd_to(&fd, res);
@@ -824,19 +991,24 @@ where
                         Some(res as i64)
                     }
                     Err(err) => Some(-(err as i32) as i64),
-                }
+                };
+                update_fd(state, guest_fd, fd);
+                res
             } else {
                 ebadf(&proc)
             }
         }
         Some(Sysno::lseek) => {
-            if let Some(mut fd) = get_fd(state, regs.rdi as i32) {
+            let guest_fd = regs.rdi as i32;
+            if let Some(mut fd) = get_fd(state, guest_fd) {
                 let offset = regs.rsi as libc::off_t;
                 let whence = regs.rdx as i32;
-                match handler.lseek(&proc, &mut fd, offset, whence) {
+                let res = match handler.lseek(&proc, &mut fd, offset, whence) {
                     Ok(res) => Some(res as i64),
                     Err(err) => Some(-(err as i32) as i64),
-                }
+                };
+                update_fd(state, guest_fd, fd);
+                res
             } else {
                 ebadf(&proc)
             }
@@ -889,7 +1061,7 @@ where
             match handler.getcwd(&proc, size) {
                 Ok(buf) => {
                      if buf.len() > 0 {
-                         write_bytes(pid, buf_addr, &buf);
+                         proc.write_memory(buf_addr, &buf);
                          Some(buf.len() as i64) 
                      } else {
                          Some(0)
@@ -946,6 +1118,18 @@ where
                 Err(err) => Some(-(err as i32) as i64),
             }
         }
+        Some(Sysno::getpgid) => {
+            match handler.getpgid(&proc, regs.rdi as i32) {
+                Ok(res) => Some(res as i64),
+                Err(err) => Some(-(err as i32) as i64),
+            }
+        }
+        Some(Sysno::getsid) => {
+            match handler.getsid(&proc, regs.rdi as i32) {
+                Ok(res) => Some(res as i64),
+                Err(err) => Some(-(err as i32) as i64),
+            }
+        }
         Some(Sysno::gettimeofday) => {
             match handler.gettimeofday(&proc) {
                 Ok(res) => Some(res as i64),
@@ -955,6 +1139,54 @@ where
         Some(Sysno::time) => {
             let tloc = regs.rdi as *mut libc::time_t;
             match handler.time(&proc, tloc) {
+                Ok(res) => Some(res as i64),
+                Err(err) => Some(-(err as i32) as i64),
+            }
+        }
+        Some(Sysno::adjtimex) => {
+            match handler.adjtimex(&proc, regs.rdi) {
+                Ok(res) => Some(res as i64),
+                Err(err) => Some(-(err as i32) as i64),
+            }
+        }
+        Some(Sysno::clock_adjtime) => {
+            match handler.clock_adjtime(&proc, regs.rdi as libc::clockid_t, regs.rsi) {
+                Ok(res) => Some(res as i64),
+                Err(err) => Some(-(err as i32) as i64),
+            }
+        }
+        Some(Sysno::getrusage) => {
+            match handler.getrusage(&proc, regs.rdi as i32, regs.rsi) {
+                Ok(res) => Some(res as i64),
+                Err(err) => Some(-(err as i32) as i64),
+            }
+        }
+        Some(Sysno::getcpu) => {
+            match handler.getcpu(&proc, regs.rdi, regs.rsi, regs.rdx) {
+                Ok(res) => Some(res as i64),
+                Err(err) => Some(-(err as i32) as i64),
+            }
+        }
+        Some(Sysno::wait4) => {
+            match handler.wait4(&proc, regs.rdi as i32, regs.rsi, regs.rdx as i32, regs.r10) {
+                Ok(res) => Some(res as i64),
+                Err(err) => Some(-(err as i32) as i64),
+            }
+        }
+        Some(Sysno::kill) => {
+            match handler.kill(&proc, regs.rdi as i32, regs.rsi as i32) {
+                Ok(res) => Some(res as i64),
+                Err(err) => Some(-(err as i32) as i64),
+            }
+        }
+        Some(Sysno::tkill) => {
+            match handler.tkill(&proc, regs.rdi as i32, regs.rsi as i32) {
+                Ok(res) => Some(res as i64),
+                Err(err) => Some(-(err as i32) as i64),
+            }
+        }
+        Some(Sysno::tgkill) => {
+            match handler.tgkill(&proc, regs.rdi as i32, regs.rsi as i32, regs.rdx as i32) {
                 Ok(res) => Some(res as i64),
                 Err(err) => Some(-(err as i32) as i64),
             }
@@ -989,6 +1221,50 @@ where
                 ebadf(&proc)
             }
         }
+        Some(Sysno::readv) => {
+            let guest_fd = regs.rdi as i32;
+            if let Some(mut fd) = get_fd(state, guest_fd) {
+                let iov = regs.rsi as u64;
+                let iovcnt = regs.rdx as i32;
+                let res = match handler.readv(&proc, &mut fd, iov, iovcnt) {
+                    Ok(res) => Some(res as i64),
+                    Err(err) => Some(-(err as i32) as i64),
+                };
+                update_fd(state, guest_fd, fd);
+                res
+            } else {
+                ebadf(&proc)
+            }
+        }
+        Some(Sysno::preadv) | Some(Sysno::preadv2) => {
+            let guest_fd = regs.rdi as i32;
+            if let Some(mut fd) = get_fd(state, guest_fd) {
+                let iov = regs.rsi as u64;
+                let iovcnt = regs.rdx as i32;
+                let offset = regs.r10 as libc::off_t;
+                if sysno == Some(Sysno::preadv2) && offset == -1 {
+                    let res = match handler.readv(&proc, &mut fd, iov, iovcnt) {
+                        Ok(res) => Some(res as i64),
+                        Err(err) => Some(-(err as i32) as i64),
+                    };
+                    update_fd(state, guest_fd, fd);
+                    res
+                } else {
+                    match handler.preadv(&proc, &mut fd, iov, iovcnt, offset) {
+                        Ok(res) => Some(res as i64),
+                        Err(err) => Some(-(err as i32) as i64),
+                    }
+                }
+            } else {
+                ebadf(&proc)
+            }
+        }
+        Some(Sysno::pwritev) | Some(Sysno::pwritev2) => {
+            if get_fd(state, regs.rdi as i32).is_none() {
+                return ebadf(&proc);
+            }
+            None
+        }
         Some(Sysno::rt_sigprocmask) => {
             // Let it fall through to the kernel.
             // We handle it here just to avoid the "unknown system call" message.
@@ -1010,7 +1286,7 @@ where
             let mut buf = vec![0u8; capped_count];
             match handler.getrandom(&proc, &mut buf, flags) {
                 Ok(res) => {
-                    write_bytes(pid, buf_addr, &buf[..res]);
+                    proc.write_memory(buf_addr, &buf[..res]);
                     Some(res as i64)
                 }
                 Err(err) => Some(-(err as i32) as i64),
@@ -1080,6 +1356,13 @@ fn get_fd<Fd: Clone + std::os::unix::io::AsRawFd>(state: &ChildState<Fd>, guest_
     }
 }
 
+fn update_fd<Fd: std::os::unix::io::AsRawFd>(state: &ChildState<Fd>, guest_fd: c_int, fd: Fd) {
+    let mut map = state.fd_map.lock().unwrap();
+    if map.contains_key(&guest_fd) {
+        map.insert(guest_fd, fd);
+    }
+}
+
 fn take_fd<Fd: std::os::unix::io::AsRawFd>(state: &ChildState<Fd>, guest_fd: c_int) -> Option<Fd> {
     let mut map = state.fd_map.lock().unwrap();
     if let Some(fd) = map.remove(&guest_fd) {
@@ -1100,42 +1383,26 @@ fn register_fd<Fd: std::os::unix::io::AsRawFd>(state: &ChildState<Fd>, fd: Fd) -
 
 
 fn read_string(pid: Pid, addr: usize) -> String {
+    if addr == 0 {
+        return String::new();
+    }
     let mut result = Vec::new();
     let mut current_addr = addr;
     loop {
-        let word = ptrace::read(pid, current_addr as *mut _).unwrap_or(0);
+        let aligned_addr = current_addr & !7;
+        let offset = current_addr & 7;
+        let word = match ptrace::read(pid, aligned_addr as *mut _) {
+            Ok(w) => w,
+            Err(_) => return String::from_utf8_lossy(&result).into_owned(),
+        };
         let bytes: [u8; 8] = word.to_ne_bytes();
-        for &b in &bytes {
+        for &b in &bytes[offset..] {
             if b == 0 {
                 return String::from_utf8_lossy(&result).into_owned();
             }
             result.push(b);
         }
-        current_addr += 8;
-    }
-}
-
-fn write_bytes(pid: Pid, addr: usize, bytes: &[u8]) {
-    let mut current_addr = addr;
-    let mut i = 0;
-    while i < bytes.len() {
-        let word_addr = (current_addr & !7) as *mut libc::c_void;
-        let offset = current_addr & 7;
-        
-        if let Ok(orig_word) = ptrace::read(pid, word_addr) {
-            let mut word_bytes = orig_word.to_ne_bytes();
-            let mut j = 0;
-            while j < 8 - offset && i < bytes.len() {
-                word_bytes[offset + j] = bytes[i];
-                i += 1;
-                j += 1;
-            }
-            let new_word = i64::from_ne_bytes(word_bytes);
-            ptrace::write(pid, word_addr, new_word).unwrap_or(());
-            current_addr += j;
-        } else {
-             break;
-        }
+        current_addr = aligned_addr + 8;
     }
 }
 
@@ -1169,13 +1436,13 @@ where
     fds
 }
 
-fn write_pollfds_revents<Fd>(pid: Pid, addr: usize, fds: &[PollFd<Fd>]) {
+fn write_pollfds_revents<Fd>(proc: &crate::captured::CapturedProcess, addr: usize, fds: &[PollFd<Fd>]) {
     let pollfd_size = std::mem::size_of::<libc::pollfd>();
     for (i, fd) in fds.iter().enumerate() {
         let item_addr = addr + i * pollfd_size;
         // revents is at offset 6.
         let revents_addr = item_addr + 6;
         let revents_bytes = fd.revents.to_ne_bytes();
-        write_bytes(pid, revents_addr, &revents_bytes);
+        proc.write_memory(revents_addr, &revents_bytes);
     }
 }

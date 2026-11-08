@@ -45,6 +45,9 @@ impl CapturedProcess {
         self.set_regs(regs)?;
         
         let mut pending_sig = None;
+        let mut in_syscall = true;
+        let mut result_regs;
+        let mut res;
         loop {
             ptrace::syscall(self.pid, pending_sig.take())?;
             let status = waitpid(self.pid, None)?;
@@ -53,7 +56,20 @@ impl CapturedProcess {
                     return Ok(0);
                 }
                 nix::sys::wait::WaitStatus::PtraceSyscall(_) => {
-                    // This is the syscall exit stop we expect
+                    if !in_syscall {
+                        // Restarted syscall entry stop
+                        self.set_regs(regs)?;
+                        in_syscall = true;
+                        continue;
+                    }
+                    in_syscall = false;
+                    result_regs = self.get_regs()?;
+                    res = result_regs.rax as i64;
+                    if matches!(res, -512 | -513 | -514 | -516) {
+                        // Syscall was interrupted by a pending signal (ERESTARTSYS etc.);
+                        // let the kernel dequeue the signal and restart the syscall.
+                        continue;
+                    }
                     break;
                 }
                 nix::sys::wait::WaitStatus::Stopped(_, sig) => {
@@ -70,9 +86,6 @@ impl CapturedProcess {
                 }
             }
         }
-        
-        let mut result_regs = self.get_regs()?;
-        let res = result_regs.rax as i64;
         if nr != orig_regs.orig_rax {
             result_regs.rdi = orig_regs.rdi;
             result_regs.rsi = orig_regs.rsi;
@@ -140,12 +153,14 @@ impl CapturedProcess {
             let Some(cur_addr) = addr.checked_add(read) else {
                 break;
             };
-            let Ok(word) = ptrace::read(self.pid, cur_addr as *mut _) else {
+            let word_addr = (cur_addr & !7) as *mut libc::c_void;
+            let offset = cur_addr & 7;
+            let Ok(word) = ptrace::read(self.pid, word_addr) else {
                 break;
             };
-            let to_copy = std::cmp::min(count - read, std::mem::size_of::<libc::c_long>());
+            let to_copy = std::cmp::min(count - read, 8 - offset);
             let bytes: [u8; 8] = word.to_ne_bytes();
-            data.extend_from_slice(&bytes[..to_copy]);
+            data.extend_from_slice(&bytes[offset..offset + to_copy]);
             read += to_copy;
         }
         data

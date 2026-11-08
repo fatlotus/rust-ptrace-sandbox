@@ -16,8 +16,8 @@ pub trait Linux<Fd> {
     /// Called when an existing Fd in `fd_map` is silently closed by `dup2`/`dup3`.
     fn on_fd_overwritten(&mut self, _fd: Fd) {}
 
-    /// Wrap a newly created raw kernel FD (e.g., from `pipe` or `pipe2`) into `Fd`.
-    fn wrap_raw_fd(&mut self, raw_fd: c_int) -> Fd;
+    /// Wrap a newly created raw kernel FD (e.g., from `pipe`, `pipe2`, or `openat2`) into `Fd`.
+    fn wrap_raw_fd(&mut self, proc: &CapturedProcess, raw_fd: c_int) -> Fd;
 
     /// dup - duplicate a file descriptor
     fn dup(&mut self, proc: &CapturedProcess, oldfd: &Fd) -> nix::Result<Fd>;
@@ -218,6 +218,12 @@ pub trait Linux<Fd> {
     /// writev - write data from multiple buffers
     fn writev(&mut self, proc: &CapturedProcess, fd: &mut Fd, iov: u64, iovcnt: i32) -> nix::Result<usize>;
 
+    /// readv - read data into multiple buffers
+    fn readv(&mut self, proc: &CapturedProcess, fd: &mut Fd, iov: u64, iovcnt: i32) -> nix::Result<usize>;
+
+    /// preadv - read data into multiple buffers at a given offset
+    fn preadv(&mut self, proc: &CapturedProcess, fd: &mut Fd, iov: u64, iovcnt: i32, offset: off_t) -> nix::Result<usize>;
+
     /// futex - fast user-space locking
     fn futex(&mut self, proc: &CapturedProcess, uaddr: *mut u32, op: c_int, val: u32, timeout: *const libc::timespec, uaddr2: *mut u32, val3: u32) -> nix::Result<c_int>;
 
@@ -225,7 +231,12 @@ pub trait Linux<Fd> {
     fn set_tid_address(&mut self, proc: &CapturedProcess, tidptr: *mut c_int) -> nix::Result<c_int>;
 
     /// on_start - called when a new child process/thread is actually created
-    fn on_start(&mut self) {}
+    fn on_start(&mut self, _pid: nix::unistd::Pid) {}
+
+    /// on_child_created - called on PTRACE_EVENT_FORK/VFORK/CLONE with new child PID; may return deterministic PID for parent rax
+    fn on_child_created(&mut self, _parent_proc: &CapturedProcess, _child_pid: nix::unistd::Pid, _parent_tidptr: Option<u64>, _child_tidptr: Option<u64>) -> Option<i64> {
+        None
+    }
 
     /// on_exec - called when a tracee stops at initial exec or PTRACE_EVENT_EXEC
     fn on_exec(&mut self, _proc: &CapturedProcess, _sp: u64) {}
@@ -239,6 +250,66 @@ pub trait Linux<Fd> {
     /// clock_nanosleep - high-resolution sleep with a specified clock
     fn clock_nanosleep(&mut self, proc: &CapturedProcess, clk_id: libc::clockid_t, flags: c_int, req: *const libc::timespec, rem: *mut libc::timespec) -> nix::Result<c_int>;
 
+    /// wait4 - wait for process to change state
+    fn wait4(&mut self, proc: &CapturedProcess, wpid: c_int, status_addr: u64, options: c_int, rusage_addr: u64) -> nix::Result<c_int> {
+        let res = proc.syscall(libc::SYS_wait4 as u64, wpid as i64 as u64, status_addr, options as u64, rusage_addr, 0, 0)?;
+        Ok(res as c_int)
+    }
+
+    /// kill - send signal to a process
+    fn kill(&mut self, proc: &CapturedProcess, pid: c_int, sig: c_int) -> nix::Result<c_int> {
+        let res = proc.syscall(libc::SYS_kill as u64, pid as i64 as u64, sig as u64, 0, 0, 0, 0)?;
+        Ok(res as c_int)
+    }
+
+    /// tkill - send signal to a thread
+    fn tkill(&mut self, proc: &CapturedProcess, tid: c_int, sig: c_int) -> nix::Result<c_int> {
+        let res = proc.syscall(libc::SYS_tkill as u64, tid as i64 as u64, sig as u64, 0, 0, 0, 0)?;
+        Ok(res as c_int)
+    }
+
+    /// tgkill - send signal to a thread in a specific thread group
+    fn tgkill(&mut self, proc: &CapturedProcess, tgid: c_int, tid: c_int, sig: c_int) -> nix::Result<c_int> {
+        let res = proc.syscall(libc::SYS_tgkill as u64, tgid as i64 as u64, tid as i64 as u64, sig as u64, 0, 0, 0)?;
+        Ok(res as c_int)
+    }
+
+    /// getpgid - get process group ID
+    fn getpgid(&mut self, proc: &CapturedProcess, pid: c_int) -> nix::Result<c_int> {
+        let res = proc.syscall(libc::SYS_getpgid as u64, pid as i64 as u64, 0, 0, 0, 0, 0)?;
+        Ok(res as c_int)
+    }
+
+    /// getsid - get session ID
+    fn getsid(&mut self, proc: &CapturedProcess, pid: c_int) -> nix::Result<c_int> {
+        let res = proc.syscall(libc::SYS_getsid as u64, pid as i64 as u64, 0, 0, 0, 0, 0)?;
+        Ok(res as c_int)
+    }
+
+    /// adjtimex - tune kernel clock
+    fn adjtimex(&mut self, proc: &CapturedProcess, buf_addr: u64) -> nix::Result<c_int> {
+        let res = proc.syscall(libc::SYS_adjtimex as u64, buf_addr, 0, 0, 0, 0, 0)?;
+        Ok(res as c_int)
+    }
+
+    /// clock_adjtime - tune a specific clock
+    fn clock_adjtime(&mut self, proc: &CapturedProcess, clk_id: libc::clockid_t, buf_addr: u64) -> nix::Result<c_int> {
+        let res = proc.syscall(libc::SYS_clock_adjtime as u64, clk_id as u64, buf_addr, 0, 0, 0, 0)?;
+        Ok(res as c_int)
+    }
+
+    /// getrusage - get resource usage
+    fn getrusage(&mut self, proc: &CapturedProcess, who: c_int, usage_addr: u64) -> nix::Result<c_int> {
+        let res = proc.syscall(libc::SYS_getrusage as u64, who as i64 as u64, usage_addr, 0, 0, 0, 0)?;
+        Ok(res as c_int)
+    }
+
+    /// getcpu - determine CPU and NUMA node on which the calling thread is running
+    fn getcpu(&mut self, proc: &CapturedProcess, cpu_addr: u64, node_addr: u64, tcache_addr: u64) -> nix::Result<c_int> {
+        let res = proc.syscall(libc::SYS_getcpu as u64, cpu_addr, node_addr, tcache_addr, 0, 0, 0)?;
+        Ok(res as c_int)
+    }
+
     /// is_verbose - check if verbose logging is enabled
     fn is_verbose(&self) -> bool;
 
@@ -247,7 +318,7 @@ pub trait Linux<Fd> {
         false
     }
 
-    /// emulate_rdtsc - check if a SIGSEGV at current RIP is caused by rdtsc/rdtscp and emulate it
+    /// emulate_rdtsc - check if a SIGSEGV at current RIP is caused by rdtsc/rdtscp/cpuid and emulate it
     fn emulate_rdtsc(&mut self, _proc: &CapturedProcess) -> bool {
         false
     }
