@@ -2,6 +2,7 @@ use crate::linux::{Linux, PollFd};
 use crate::captured::CapturedProcess;
 use libc::{c_int, c_void, mode_t, off_t};
 
+#[derive(Clone, Copy)]
 pub struct PassthruFd(pub c_int);
 
 impl std::os::unix::io::AsRawFd for PassthruFd {
@@ -33,6 +34,38 @@ impl Linux<PassthruFd> for Passthru {
     
     fn dup_fd(&mut self, fd: &PassthruFd) -> PassthruFd {
         PassthruFd(fd.0)
+    }
+
+    fn dup_fd_to(&mut self, _fd: &PassthruFd, new_raw_fd: c_int) -> PassthruFd {
+        PassthruFd(new_raw_fd)
+    }
+
+    fn wrap_raw_fd(&mut self, raw_fd: c_int) -> PassthruFd {
+        PassthruFd(raw_fd)
+    }
+
+    fn dup(&mut self, proc: &CapturedProcess, oldfd: &PassthruFd) -> nix::Result<PassthruFd> {
+        let res = proc.dup(oldfd.0)?;
+        if self.verbose {
+            println!("dup({}) = {}", oldfd.0, res);
+        }
+        Ok(PassthruFd(res as c_int))
+    }
+
+    fn dup2(&mut self, proc: &CapturedProcess, oldfd: &PassthruFd, newfd: c_int) -> nix::Result<PassthruFd> {
+        let res = proc.dup2(oldfd.0, newfd)?;
+        if self.verbose {
+            println!("dup2({}, {}) = {}", oldfd.0, newfd, res);
+        }
+        Ok(PassthruFd(res as c_int))
+    }
+
+    fn dup3(&mut self, proc: &CapturedProcess, oldfd: &PassthruFd, newfd: c_int, flags: c_int) -> nix::Result<PassthruFd> {
+        let res = proc.dup3(oldfd.0, newfd, flags)?;
+        if self.verbose {
+            println!("dup3({}, {}, {}) = {}", oldfd.0, newfd, flags, res);
+        }
+        Ok(PassthruFd(res as c_int))
     }
 
     fn write(&mut self, proc: &CapturedProcess, fd: &mut PassthruFd, buf: &[u8]) -> nix::Result<usize> {

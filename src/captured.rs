@@ -32,7 +32,9 @@ impl CapturedProcess {
     }
 
     pub fn syscall(&self, nr: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64, arg5: u64, arg6: u64) -> Result<i64> {
-        let mut regs = self.get_regs()?;
+        let orig_regs = self.get_regs()?;
+        let mut regs = orig_regs;
+        regs.orig_rax = nr;
         regs.rax = nr;
         regs.rdi = arg1;
         regs.rsi = arg2;
@@ -68,11 +70,23 @@ impl CapturedProcess {
             }
         }
         
-        let result_regs = self.get_regs()?;
-        if (result_regs.rax as i64) < 0 && (result_regs.rax as i64) > -4096 {
-            Err(nix::errno::Errno::from_raw(-(result_regs.rax as i32)))
+        let mut result_regs = self.get_regs()?;
+        let res = result_regs.rax as i64;
+        if nr != orig_regs.orig_rax {
+            result_regs.rdi = orig_regs.rdi;
+            result_regs.rsi = orig_regs.rsi;
+            result_regs.rdx = orig_regs.rdx;
+            result_regs.r10 = orig_regs.r10;
+            result_regs.r8 = orig_regs.r8;
+            result_regs.r9 = orig_regs.r9;
+            result_regs.rcx = orig_regs.rcx;
+            result_regs.r11 = orig_regs.r11;
+            let _ = self.set_regs(result_regs);
+        }
+        if res < 0 && res > -4096 {
+            Err(nix::errno::Errno::from_raw(-(res as i32)))
         } else {
-            Ok(result_regs.rax as i64)
+            Ok(res)
         }
     }
 
@@ -179,6 +193,22 @@ impl CapturedProcess {
 
     pub fn close(&self, fd: c_int) -> Result<i64> {
         self.syscall(libc::SYS_close as u64, fd as u64, 0, 0, 0, 0, 0)
+    }
+
+    pub fn eventfd2(&self, initval: libc::c_uint, flags: c_int) -> Result<i64> {
+        self.syscall(libc::SYS_eventfd2 as u64, initval as u64, flags as u64, 0, 0, 0, 0)
+    }
+
+    pub fn dup(&self, oldfd: c_int) -> Result<i64> {
+        self.syscall(libc::SYS_dup as u64, oldfd as u64, 0, 0, 0, 0, 0)
+    }
+
+    pub fn dup2(&self, oldfd: c_int, newfd: c_int) -> Result<i64> {
+        self.syscall(libc::SYS_dup2 as u64, oldfd as u64, newfd as u64, 0, 0, 0, 0)
+    }
+
+    pub fn dup3(&self, oldfd: c_int, newfd: c_int, flags: c_int) -> Result<i64> {
+        self.syscall(libc::SYS_dup3 as u64, oldfd as u64, newfd as u64, flags as u64, 0, 0, 0)
     }
 
     pub fn stat(&self, addr: u64, statbuf: u64) -> Result<i64> {

@@ -54,4 +54,27 @@ fn main() {
         use std::os::unix::fs::MetadataExt;
         println!("Statx: ino={} mtime={}", meta.ino(), meta.mtime());
     }
+
+    // Test unintercepted FD syscall (getdents64 via read_dir)
+    let dir_ok = std::fs::read_dir("/etc").map(|mut d| d.next().is_some()).unwrap_or(false);
+    println!("ReadDir: {}", dir_ok);
+
+    // Test dup2 on virtualized socket and poll with fd=-1 + POLLOUT
+    unsafe {
+        let sfd = libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0);
+        let dup_sfd = libc::dup2(sfd, 42);
+        let mut pfds = [
+            libc::pollfd { fd: -1, events: libc::POLLIN, revents: 99 },
+            libc::pollfd { fd: dup_sfd, events: libc::POLLOUT, revents: 0 },
+            libc::pollfd { fd: 9999, events: libc::POLLIN, revents: 0 },
+        ];
+        let pret = libc::poll(pfds.as_mut_ptr(), pfds.len() as libc::nfds_t, 0);
+        let close1 = libc::close(sfd);
+        let close2 = libc::close(dup_sfd);
+        let bad_close = libc::close(9999);
+        println!(
+            "FdTest: dup={} poll={} rev0={} rev1={} rev2={} close={},{},{}",
+            dup_sfd, pret, pfds[0].revents, pfds[1].revents, pfds[2].revents, close1, close2, bad_close
+        );
+    }
 }

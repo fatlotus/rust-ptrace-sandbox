@@ -70,6 +70,14 @@ fn do_test_random_gen_deterministic() {
     let tid2 = stdout2.lines().find(|l| l.contains("Tid:")).unwrap();
     assert_eq!(tid1, tid2);
     assert_eq!(tid1, "Tid: 1234");
+
+    let rdir1 = stdout1.lines().find(|l| l.contains("ReadDir:")).unwrap();
+    assert_eq!(rdir1, "ReadDir: true");
+
+    let fd1 = stdout1.lines().find(|l| l.contains("FdTest:")).unwrap();
+    let fd2 = stdout2.lines().find(|l| l.contains("FdTest:")).unwrap();
+    assert_eq!(fd1, fd2);
+    assert_eq!(fd1, "FdTest: dup=42 poll=2 rev0=0 rev1=4 rev2=32 close=0,0,-1");
 }
 
 fn do_test_random_gen_nondeterministic() {

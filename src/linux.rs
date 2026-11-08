@@ -9,6 +9,25 @@ pub trait Linux<Fd> {
     /// Used for fork/clone where child inherits file descriptors.
     fn dup_fd(&mut self, fd: &Fd) -> Fd;
 
+    /// Create a new Fd object referring to the same resource at `new_raw_fd`.
+    /// Used for `dup`, `dup2`, `dup3`, `fcntl(F_DUPFD)`.
+    fn dup_fd_to(&mut self, fd: &Fd, new_raw_fd: c_int) -> Fd;
+
+    /// Called when an existing Fd in `fd_map` is silently closed by `dup2`/`dup3`.
+    fn on_fd_overwritten(&mut self, _fd: Fd) {}
+
+    /// Wrap a newly created raw kernel FD (e.g., from `pipe` or `pipe2`) into `Fd`.
+    fn wrap_raw_fd(&mut self, raw_fd: c_int) -> Fd;
+
+    /// dup - duplicate a file descriptor
+    fn dup(&mut self, proc: &CapturedProcess, oldfd: &Fd) -> nix::Result<Fd>;
+
+    /// dup2 - duplicate a file descriptor to a target fd
+    fn dup2(&mut self, proc: &CapturedProcess, oldfd: &Fd, newfd: c_int) -> nix::Result<Fd>;
+
+    /// dup3 - duplicate a file descriptor to a target fd with flags
+    fn dup3(&mut self, proc: &CapturedProcess, oldfd: &Fd, newfd: c_int, flags: c_int) -> nix::Result<Fd>;
+
     /// write - write to a file descriptor
     ///
     /// write() writes up to count bytes from the buffer starting at buf to the file referred to by the file descriptor fd.
@@ -227,7 +246,8 @@ pub trait Linux<Fd> {
 #[derive(Debug, Clone, Copy, Default)]
 #[repr(C)]
 pub struct PollFd<Fd> {
-    pub fd: Fd,
+    pub fd: Option<Fd>,
+    pub raw_fd: c_int,
     pub events: i16,
     pub revents: i16,
 }

@@ -8,9 +8,10 @@ use std::net::SocketAddr;
 use std::time::Duration;
 use std::cmp::Ordering;
 
+#[derive(Clone, Copy)]
 pub enum DeterministicFd {
     Passthru(PassthruFd),
-    Virtualized(usize),
+    Virtualized(c_int, usize),
     VirtualRandom(PassthruFd),
 }
 
@@ -18,7 +19,7 @@ impl std::os::unix::io::AsRawFd for DeterministicFd {
     fn as_raw_fd(&self) -> c_int {
         match self {
             DeterministicFd::Passthru(f) | DeterministicFd::VirtualRandom(f) => f.0,
-            DeterministicFd::Virtualized(_) => -1,
+            DeterministicFd::Virtualized(raw_fd, _) => *raw_fd,
         }
     }
 }
@@ -30,6 +31,7 @@ struct VirtualSocket {
     peer: Option<usize>, // Index of peer socket if connected
     read_buf: Vec<u8>,
     closed: bool,
+    open_count: usize,
 }
 
 struct NetworkInner {
@@ -496,22 +498,68 @@ impl Linux<DeterministicFd> for Deterministic {
     fn dup_fd(&mut self, fd: &DeterministicFd) -> DeterministicFd {
         match fd {
             DeterministicFd::Passthru(f) => DeterministicFd::Passthru(self.passthru.dup_fd(f)),
-            DeterministicFd::Virtualized(idx) => DeterministicFd::Virtualized(*idx),
+            DeterministicFd::Virtualized(raw_fd, idx) => {
+                let inner = self.network.inner.lock().unwrap();
+                let mut sock = inner.sockets[*idx].lock().unwrap();
+                sock.open_count += 1;
+                DeterministicFd::Virtualized(*raw_fd, *idx)
+            }
             DeterministicFd::VirtualRandom(f) => DeterministicFd::VirtualRandom(self.passthru.dup_fd(f)),
         }
+    }
+
+    fn dup_fd_to(&mut self, fd: &DeterministicFd, new_raw_fd: c_int) -> DeterministicFd {
+        match fd {
+            DeterministicFd::Passthru(_) => DeterministicFd::Passthru(PassthruFd(new_raw_fd)),
+            DeterministicFd::Virtualized(_, idx) => {
+                let inner = self.network.inner.lock().unwrap();
+                let mut sock = inner.sockets[*idx].lock().unwrap();
+                sock.open_count += 1;
+                DeterministicFd::Virtualized(new_raw_fd, *idx)
+            }
+            DeterministicFd::VirtualRandom(_) => DeterministicFd::VirtualRandom(PassthruFd(new_raw_fd)),
+        }
+    }
+
+    fn on_fd_overwritten(&mut self, fd: DeterministicFd) {
+        if let DeterministicFd::Virtualized(_, idx) = fd {
+            self.release_virtual_socket(idx);
+        }
+    }
+
+    fn wrap_raw_fd(&mut self, raw_fd: c_int) -> DeterministicFd {
+        DeterministicFd::Passthru(PassthruFd(raw_fd))
+    }
+
+    fn dup(&mut self, proc: &CapturedProcess, oldfd: &DeterministicFd) -> nix::Result<DeterministicFd> {
+        use std::os::unix::io::AsRawFd;
+        let res = proc.dup(oldfd.as_raw_fd())?;
+        Ok(self.dup_fd_to(oldfd, res as c_int))
+    }
+
+    fn dup2(&mut self, proc: &CapturedProcess, oldfd: &DeterministicFd, newfd: c_int) -> nix::Result<DeterministicFd> {
+        use std::os::unix::io::AsRawFd;
+        let res = proc.dup2(oldfd.as_raw_fd(), newfd)?;
+        Ok(self.dup_fd_to(oldfd, res as c_int))
+    }
+
+    fn dup3(&mut self, proc: &CapturedProcess, oldfd: &DeterministicFd, newfd: c_int, flags: c_int) -> nix::Result<DeterministicFd> {
+        use std::os::unix::io::AsRawFd;
+        let res = proc.dup3(oldfd.as_raw_fd(), newfd, flags)?;
+        Ok(self.dup_fd_to(oldfd, res as c_int))
     }
 
     fn write(&mut self, proc: &CapturedProcess, fd: &mut DeterministicFd, buf: &[u8]) -> nix::Result<usize> {
         match fd {
             DeterministicFd::Passthru(f) | DeterministicFd::VirtualRandom(f) => self.passthru.write(proc, f, buf),
-            DeterministicFd::Virtualized(idx) => self.virtual_write(proc, *idx, buf),
+            DeterministicFd::Virtualized(_, idx) => self.virtual_write(proc, *idx, buf),
         }
     }
 
     fn read(&mut self, proc: &CapturedProcess, fd: &mut DeterministicFd, count: usize) -> nix::Result<Vec<u8>> {
         match fd {
             DeterministicFd::Passthru(f) => self.passthru.read(proc, f, count),
-            DeterministicFd::Virtualized(idx) => self.virtual_read(proc, *idx, count),
+            DeterministicFd::Virtualized(_, idx) => self.virtual_read(proc, *idx, count),
             DeterministicFd::VirtualRandom(_) => {
                 self.skip_syscall(proc);
                 let n = std::cmp::min(count, 65536);
@@ -548,7 +596,7 @@ impl Linux<DeterministicFd> for Deterministic {
     fn close(&mut self, proc: &CapturedProcess, fd: DeterministicFd) -> nix::Result<c_int> {
         match fd {
             DeterministicFd::Passthru(f) | DeterministicFd::VirtualRandom(f) => self.passthru.close(proc, f),
-            DeterministicFd::Virtualized(idx) => self.virtual_close(proc, idx),
+            DeterministicFd::Virtualized(raw_fd, idx) => self.virtual_close(proc, raw_fd, idx),
         }
     }
 
@@ -580,7 +628,7 @@ impl Linux<DeterministicFd> for Deterministic {
                 }
                 Ok(res)
             }
-            DeterministicFd::Virtualized(_) => {
+            DeterministicFd::Virtualized(_, _) => {
                 let regs = proc.get_regs()?;
                 self.skip_syscall(proc);
                 if regs.rsi == 0 {
@@ -695,11 +743,18 @@ impl Linux<DeterministicFd> for Deterministic {
         Ok((pid, Box::new(Deterministic::with_tid(self.passthru.verbose, self.network.clone(), self.time_manager.clone(), tid_address.map(|a| a as u64)))))
     }
 
-    fn socket(&mut self, _proc: &CapturedProcess, domain: c_int, ty: c_int, protocol: c_int) -> nix::Result<DeterministicFd> {
+    fn socket(&mut self, proc: &CapturedProcess, domain: c_int, ty: c_int, protocol: c_int) -> nix::Result<DeterministicFd> {
         if self.passthru.verbose {
             println!("socket({}, {}, {}) (VIRTUAL)", domain, ty, protocol);
         }
-        self.skip_syscall(_proc);
+        let mut efd_flags = 0;
+        if (ty & libc::SOCK_CLOEXEC) != 0 {
+            efd_flags |= libc::EFD_CLOEXEC;
+        }
+        if (ty & libc::SOCK_NONBLOCK) != 0 {
+            efd_flags |= libc::EFD_NONBLOCK;
+        }
+        let raw_fd = proc.eventfd2(0, efd_flags)? as c_int;
         let sock = VirtualSocket {
             addr: None,
             is_listener: false,
@@ -707,17 +762,18 @@ impl Linux<DeterministicFd> for Deterministic {
             peer: None,
             read_buf: Vec::new(),
             closed: false,
+            open_count: 1,
         };
         let mut inner = self.network.inner.lock().unwrap();
         let idx = inner.sockets.len();
         inner.sockets.push(Arc::new(Mutex::new(sock)));
-        Ok(DeterministicFd::Virtualized(idx))
+        Ok(DeterministicFd::Virtualized(raw_fd, idx))
     }
 
     fn bind(&mut self, proc: &CapturedProcess, fd: &mut DeterministicFd, addr: *const libc::sockaddr, len: libc::socklen_t) -> nix::Result<c_int> {
         match fd {
             DeterministicFd::Passthru(f) | DeterministicFd::VirtualRandom(f) => self.passthru.bind(proc, f, addr, len),
-            DeterministicFd::Virtualized(idx) => {
+            DeterministicFd::Virtualized(_, idx) => {
                 let mut sock_addr = unsafe { self.read_sockaddr(proc, addr, len)? };
                 if self.passthru.verbose {
                     println!("bind({}, {:?}) (VIRTUAL)", idx, sock_addr);
@@ -753,7 +809,7 @@ impl Linux<DeterministicFd> for Deterministic {
     fn listen(&mut self, proc: &CapturedProcess, fd: &mut DeterministicFd, backlog: c_int) -> nix::Result<c_int> {
         match fd {
             DeterministicFd::Passthru(f) | DeterministicFd::VirtualRandom(f) => self.passthru.listen(proc, f, backlog),
-            DeterministicFd::Virtualized(idx) => {
+            DeterministicFd::Virtualized(_, idx) => {
                 if self.passthru.verbose {
                     println!("listen({}, {}) (VIRTUAL)", idx, backlog);
                 }
@@ -770,10 +826,10 @@ impl Linux<DeterministicFd> for Deterministic {
         self.accept4(proc, fd, addr, len, 0)
     }
 
-    fn accept4(&mut self, proc: &CapturedProcess, fd: &mut DeterministicFd, addr: *mut libc::sockaddr, len: *mut libc::socklen_t, _flags: c_int) -> nix::Result<DeterministicFd> {
+    fn accept4(&mut self, proc: &CapturedProcess, fd: &mut DeterministicFd, addr: *mut libc::sockaddr, len: *mut libc::socklen_t, flags: c_int) -> nix::Result<DeterministicFd> {
         match fd {
-            DeterministicFd::Passthru(f) | DeterministicFd::VirtualRandom(f) => self.passthru.accept4(proc, f, addr, len, _flags).map(DeterministicFd::Passthru),
-            DeterministicFd::Virtualized(idx) => {
+            DeterministicFd::Passthru(f) | DeterministicFd::VirtualRandom(f) => self.passthru.accept4(proc, f, addr, len, flags).map(DeterministicFd::Passthru),
+            DeterministicFd::Virtualized(_, idx) => {
                 loop {
                     let mut inner = self.network.inner.lock().unwrap();
                     let res = {
@@ -788,7 +844,15 @@ impl Linux<DeterministicFd> for Deterministic {
                     };
 
                     if let Some((client_idx, client_addr)) = res {
-                        self.skip_syscall(proc);
+                        drop(inner);
+                        let mut efd_flags = 0;
+                        if (flags & libc::SOCK_CLOEXEC) != 0 {
+                            efd_flags |= libc::EFD_CLOEXEC;
+                        }
+                        if (flags & libc::SOCK_NONBLOCK) != 0 {
+                            efd_flags |= libc::EFD_NONBLOCK;
+                        }
+                        let raw_fd = proc.eventfd2(0, efd_flags)? as c_int;
                         if !addr.is_null() {
                             if let Some(c_addr) = client_addr {
                                 unsafe { self.write_sockaddr(proc, addr, len, c_addr)?; }
@@ -798,7 +862,7 @@ impl Linux<DeterministicFd> for Deterministic {
                         if self.passthru.verbose {
                             println!("accept({}, ...) = {} (VIRTUAL)", idx, client_idx);
                         }
-                        return Ok(DeterministicFd::Virtualized(client_idx));
+                        return Ok(DeterministicFd::Virtualized(raw_fd, client_idx));
                     }
 
                     if !proc.is_alive() {
@@ -819,7 +883,7 @@ impl Linux<DeterministicFd> for Deterministic {
     fn connect(&mut self, proc: &CapturedProcess, fd: &mut DeterministicFd, addr: *const libc::sockaddr, len: libc::socklen_t) -> nix::Result<c_int> {
         match fd {
             DeterministicFd::Passthru(f) | DeterministicFd::VirtualRandom(f) => self.passthru.connect(proc, f, addr, len),
-            DeterministicFd::Virtualized(idx) => {
+            DeterministicFd::Virtualized(_, idx) => {
                 let dest_addr = unsafe { self.read_sockaddr(proc, addr, len)? };
                 if self.passthru.verbose {
                     println!("connect({}, {:?}) (VIRTUAL)", idx, dest_addr);
@@ -842,6 +906,7 @@ impl Linux<DeterministicFd> for Deterministic {
                     peer: Some(*idx),
                     read_buf: Vec::new(),
                     closed: false,
+                    open_count: 1,
                 };
                 let peer_idx = inner.sockets.len();
                 inner.sockets.push(Arc::new(Mutex::new(peer_sock)));
@@ -851,12 +916,8 @@ impl Linux<DeterministicFd> for Deterministic {
                     client_sock.peer = Some(peer_idx);
                 }
 
-                // Swap the server's backlog entry to use the peer socket instead of the client socket?
-                // Actually, accept should return a *new* socket.
-                // Re-doing logic: accept returns a new socket that is connected to the client.
                 {
                     let mut server_sock = inner.sockets[server_idx].lock().unwrap();
-                    // Replace the client idx with the peer idx in the backlog
                     let last_idx = server_sock.backlog.len() - 1;
                     server_sock.backlog[last_idx] = peer_idx;
                 }
@@ -870,8 +931,8 @@ impl Linux<DeterministicFd> for Deterministic {
     fn setsockopt(&mut self, proc: &CapturedProcess, fd: &mut DeterministicFd, level: c_int, optname: c_int, optval: *const c_void, optlen: libc::socklen_t) -> nix::Result<c_int> {
         match fd {
             DeterministicFd::Passthru(f) | DeterministicFd::VirtualRandom(f) => self.passthru.setsockopt(proc, f, level, optname, optval, optlen),
-            DeterministicFd::Virtualized(_) => {
-                // TODO: Implement setsockopt for virtualized sockets
+            DeterministicFd::Virtualized(_, _) => {
+                self.skip_syscall(proc);
                 Ok(0)
             }
         }
@@ -880,16 +941,13 @@ impl Linux<DeterministicFd> for Deterministic {
     fn getsockname(&mut self, proc: &CapturedProcess, fd: &mut DeterministicFd, addr: *mut libc::sockaddr, len: *mut libc::socklen_t) -> nix::Result<c_int> {
         match fd {
             DeterministicFd::Passthru(f) | DeterministicFd::VirtualRandom(f) => self.passthru.getsockname(proc, f, addr, len),
-            DeterministicFd::Virtualized(idx) => {
+            DeterministicFd::Virtualized(_, idx) => {
                 self.skip_syscall(proc);
                 let inner = self.network.inner.lock().unwrap();
                 let sock = inner.sockets[*idx].lock().unwrap();
-                if let Some(sock_addr) = sock.addr {
-                    unsafe { self.write_sockaddr(proc, addr, len, sock_addr)?; }
-                    Ok(0)
-                } else {
-                    Err(nix::Error::EBADF)
-                }
+                let sock_addr = sock.addr.unwrap_or_else(|| SocketAddr::from(([0, 0, 0, 0], 0)));
+                unsafe { self.write_sockaddr(proc, addr, len, sock_addr)?; }
+                Ok(0)
             }
         }
     }
@@ -897,7 +955,10 @@ impl Linux<DeterministicFd> for Deterministic {
     fn pread(&mut self, proc: &CapturedProcess, fd: &mut DeterministicFd, count: usize, offset: off_t) -> nix::Result<Vec<u8>> {
         match fd {
             DeterministicFd::Passthru(f) => self.passthru.pread(proc, f, count, offset),
-            DeterministicFd::Virtualized(_) => Err(nix::Error::ESPIPE),
+            DeterministicFd::Virtualized(_, _) => {
+                self.skip_syscall(proc);
+                Err(nix::Error::ESPIPE)
+            }
             DeterministicFd::VirtualRandom(_) => {
                 self.skip_syscall(proc);
                 let n = std::cmp::min(count, 65536);
@@ -906,74 +967,102 @@ impl Linux<DeterministicFd> for Deterministic {
         }
     }
 
-    fn poll(&mut self, proc: &CapturedProcess, fds: &mut [PollFd<DeterministicFd>], _timeout: c_int) -> nix::Result<c_int> {
-        // Check if any virtualized FDs are ready, or if all are passthru
+    fn poll(&mut self, proc: &CapturedProcess, fds: &mut [PollFd<DeterministicFd>], timeout: c_int) -> nix::Result<c_int> {
         let mut any_virtual = false;
         for f in fds.iter() {
-            if let DeterministicFd::Virtualized(_) = f.fd {
-                any_virtual = true;
-                break;
+            match f.fd {
+                Some(DeterministicFd::Virtualized(_, _)) | Some(DeterministicFd::VirtualRandom(_)) => {
+                    any_virtual = true;
+                    break;
+                }
+                None if f.raw_fd >= 0 => {
+                    any_virtual = true;
+                    break;
+                }
+                _ => {}
             }
         }
 
         if !any_virtual {
-            // All passthru, we can delegate but we need to convert PollFd<DeterministicFd> to PollFd<PassthruFd>
             let mut p_fds: Vec<PollFd<PassthruFd>> = fds.iter().map(|f| {
-                match f.fd {
-                    DeterministicFd::Passthru(ref pf) | DeterministicFd::VirtualRandom(ref pf) => PollFd { fd: PassthruFd(pf.0), events: f.events, revents: f.revents },
-                    _ => unreachable!(),
-                }
+                let pf = match f.fd {
+                    Some(DeterministicFd::Passthru(pf)) | Some(DeterministicFd::VirtualRandom(pf)) => Some(pf),
+                    _ => None,
+                };
+                PollFd { fd: pf, raw_fd: f.raw_fd, events: f.events, revents: f.revents }
             }).collect();
-            let res = self.passthru.poll(proc, &mut p_fds, _timeout)?;
+            let res = self.passthru.poll(proc, &mut p_fds, timeout)?;
             for (i, p_f) in p_fds.iter().enumerate() {
                 fds[i].revents = p_f.revents;
             }
             return Ok(res);
         }
 
-        // Mixed or all virtualized. For now, only handle virtualized correctly.
-        // TODO: Handle mixed FDs by polling passthru ones with 0 timeout.
         self.skip_syscall(proc);
+        let mut waited_ms: i64 = 0;
         loop {
             let mut ready_count = 0;
-            let mut inner = self.network.inner.lock().unwrap();
+            let inner = self.network.inner.lock().unwrap();
             for f in fds.iter_mut() {
                 f.revents = 0;
                 match f.fd {
-                    DeterministicFd::Virtualized(idx) => {
-                        let sock = inner.sockets[idx].lock().unwrap();
-                        if !sock.read_buf.is_empty() {
-                            f.revents |= libc::POLLIN;
-                        }
-                        if sock.is_listener && !sock.backlog.is_empty() {
-                            f.revents |= libc::POLLIN;
-                        }
-                        if sock.closed {
-                            f.revents |= libc::POLLHUP;
-                        }
-                        if f.revents & f.events != 0 {
+                    None => {
+                        if f.raw_fd >= 0 {
+                            f.revents = libc::POLLNVAL;
                             ready_count += 1;
                         }
                     }
-                    DeterministicFd::Passthru(_) | DeterministicFd::VirtualRandom(_) => {
-                        // For now, ignore passthru FDs when mixed
+                    Some(DeterministicFd::Virtualized(_, idx)) => {
+                        let sock = inner.sockets[idx].lock().unwrap();
+                        if !sock.read_buf.is_empty() || (sock.is_listener && !sock.backlog.is_empty()) {
+                            f.revents |= f.events & (libc::POLLIN | libc::POLLRDNORM);
+                        }
+                        if !sock.closed && !sock.is_listener {
+                            f.revents |= f.events & (libc::POLLOUT | libc::POLLWRNORM);
+                        }
+                        if sock.closed {
+                            f.revents |= libc::POLLHUP;
+                            if (f.events & libc::POLLIN) != 0 {
+                                f.revents |= libc::POLLIN;
+                            }
+                        }
+                        if f.revents != 0 {
+                            ready_count += 1;
+                        }
+                    }
+                    Some(DeterministicFd::VirtualRandom(_)) | Some(DeterministicFd::Passthru(_)) => {
+                        f.revents = f.events & (libc::POLLIN | libc::POLLOUT | libc::POLLRDNORM | libc::POLLWRNORM);
+                        if f.revents != 0 {
+                            ready_count += 1;
+                        }
                     }
                 }
             }
 
-            if ready_count > 0 {
+            if ready_count > 0 || timeout == 0 {
                 return Ok(ready_count);
+            }
+
+            if timeout > 0 && waited_ms >= timeout as i64 {
+                let _ = self.time_manager.sleep(proc, Duration::from_millis(timeout as u64));
+                return Ok(0);
             }
 
             if !proc.is_alive() {
                 return Err(nix::Error::ESRCH);
             }
 
-            // Wait for events with timeout
-            let (new_inner, timeout_res) = self.network.condvar.wait_timeout(inner, std::time::Duration::from_millis(100)).unwrap();
-            inner = new_inner;
-            if timeout_res.timed_out() && !proc.is_alive() {
-                return Err(nix::Error::ESRCH);
+            let wait_slice = if timeout > 0 {
+                std::cmp::min(20, (timeout as i64 - waited_ms) as u64)
+            } else {
+                100
+            };
+            let (_new_inner, timeout_res) = self.network.condvar.wait_timeout(inner, std::time::Duration::from_millis(wait_slice)).unwrap();
+            if timeout_res.timed_out() {
+                waited_ms += wait_slice as i64;
+                if !proc.is_alive() {
+                    return Err(nix::Error::ESRCH);
+                }
             }
         }
     }
@@ -981,23 +1070,23 @@ impl Linux<DeterministicFd> for Deterministic {
     fn sendto(&mut self, proc: &CapturedProcess, fd: &mut DeterministicFd, buf: &[u8], flags: c_int, addr: *const libc::sockaddr, len: libc::socklen_t) -> nix::Result<usize> {
         match fd {
             DeterministicFd::Passthru(f) | DeterministicFd::VirtualRandom(f) => self.passthru.sendto(proc, f, buf, flags, addr, len),
-            DeterministicFd::Virtualized(idx) => self.virtual_write(proc, *idx, buf),
+            DeterministicFd::Virtualized(_, idx) => self.virtual_write(proc, *idx, buf),
         }
     }
 
     fn recvfrom(&mut self, proc: &CapturedProcess, fd: &mut DeterministicFd, count: usize, flags: c_int, addr: *mut libc::sockaddr, len: *mut libc::socklen_t) -> nix::Result<Vec<u8>> {
         match fd {
             DeterministicFd::Passthru(f) | DeterministicFd::VirtualRandom(f) => self.passthru.recvfrom(proc, f, count, flags, addr, len),
-            DeterministicFd::Virtualized(idx) => self.virtual_read(proc, *idx, count),
+            DeterministicFd::Virtualized(_, idx) => self.virtual_read(proc, *idx, count),
         }
     }
 
     fn fcntl(&mut self, proc: &CapturedProcess, fd: &mut DeterministicFd, cmd: c_int, arg: libc::c_ulong) -> nix::Result<c_int> {
         match fd {
             DeterministicFd::Passthru(f) | DeterministicFd::VirtualRandom(f) => self.passthru.fcntl(proc, f, cmd, arg),
-            DeterministicFd::Virtualized(_) => {
-                // TODO: Implement fcntl for virtualized sockets
-                Ok(0)
+            DeterministicFd::Virtualized(raw_fd, _) => {
+                let mut pf = PassthruFd(*raw_fd);
+                self.passthru.fcntl(proc, &mut pf, cmd, arg)
             }
         }
     }
@@ -1005,7 +1094,10 @@ impl Linux<DeterministicFd> for Deterministic {
     fn lseek(&mut self, proc: &CapturedProcess, fd: &mut DeterministicFd, offset: off_t, whence: c_int) -> nix::Result<off_t> {
         match fd {
             DeterministicFd::Passthru(f) | DeterministicFd::VirtualRandom(f) => self.passthru.lseek(proc, f, offset, whence),
-            DeterministicFd::Virtualized(_) => Err(nix::Error::ESPIPE),
+            DeterministicFd::Virtualized(_, _) => {
+                self.skip_syscall(proc);
+                Err(nix::Error::ESPIPE)
+            }
         }
     }
 
@@ -1016,21 +1108,30 @@ impl Linux<DeterministicFd> for Deterministic {
     fn pwrite(&mut self, proc: &CapturedProcess, fd: &mut DeterministicFd, buf: &[u8], offset: off_t) -> nix::Result<usize> {
         match fd {
             DeterministicFd::Passthru(f) | DeterministicFd::VirtualRandom(f) => self.passthru.pwrite(proc, f, buf, offset),
-            DeterministicFd::Virtualized(_) => Err(nix::Error::ESPIPE),
+            DeterministicFd::Virtualized(_, _) => {
+                self.skip_syscall(proc);
+                Err(nix::Error::ESPIPE)
+            }
         }
     }
 
     fn fsync(&mut self, proc: &CapturedProcess, fd: &mut DeterministicFd) -> nix::Result<c_int> {
         match fd {
             DeterministicFd::Passthru(f) | DeterministicFd::VirtualRandom(f) => self.passthru.fsync(proc, f),
-            DeterministicFd::Virtualized(_) => Ok(0),
+            DeterministicFd::Virtualized(_, _) => {
+                self.skip_syscall(proc);
+                Err(nix::Error::EINVAL)
+            }
         }
     }
 
     fn fdatasync(&mut self, proc: &CapturedProcess, fd: &mut DeterministicFd) -> nix::Result<c_int> {
         match fd {
             DeterministicFd::Passthru(f) | DeterministicFd::VirtualRandom(f) => self.passthru.fdatasync(proc, f),
-            DeterministicFd::Virtualized(_) => Ok(0),
+            DeterministicFd::Virtualized(_, _) => {
+                self.skip_syscall(proc);
+                Err(nix::Error::EINVAL)
+            }
         }
     }
 
@@ -1231,9 +1332,31 @@ impl Linux<DeterministicFd> for Deterministic {
     fn writev(&mut self, proc: &CapturedProcess, fd: &mut DeterministicFd, iov: u64, iovcnt: i32) -> nix::Result<usize> {
         match fd {
             DeterministicFd::Passthru(f) | DeterministicFd::VirtualRandom(f) => self.passthru.writev(proc, f, iov, iovcnt),
-            DeterministicFd::Virtualized(_idx) => {
-                // TODO: Implement writev for virtualized sockets
-                Ok(0)
+            DeterministicFd::Virtualized(_, idx) => {
+                if iovcnt < 0 || iovcnt > 1024 {
+                    self.skip_syscall(proc);
+                    return Err(nix::Error::EINVAL);
+                }
+                let mut combined = Vec::new();
+                for i in 0..iovcnt as usize {
+                    let entry_addr = (iov as usize).saturating_add(i * 16);
+                    let entry_bytes = proc.read_memory(entry_addr, 16);
+                    if entry_bytes.len() < 16 {
+                        self.skip_syscall(proc);
+                        return Err(nix::Error::EFAULT);
+                    }
+                    let base = u64::from_ne_bytes(entry_bytes[0..8].try_into().unwrap()) as usize;
+                    let len = u64::from_ne_bytes(entry_bytes[8..16].try_into().unwrap()) as usize;
+                    if len > 0 {
+                        let chunk = proc.read_memory(base, len);
+                        if chunk.len() < len {
+                            self.skip_syscall(proc);
+                            return Err(nix::Error::EFAULT);
+                        }
+                        combined.extend_from_slice(&chunk);
+                    }
+                }
+                self.virtual_write(proc, *idx, &combined)
             }
         }
     }
@@ -1347,14 +1470,35 @@ impl Linux<DeterministicFd> for Deterministic {
 }
 
 impl Deterministic {
+    fn release_virtual_socket(&self, idx: usize) {
+        let inner = self.network.inner.lock().unwrap();
+        let mut sock = inner.sockets[idx].lock().unwrap();
+        if sock.open_count > 0 {
+            sock.open_count -= 1;
+        }
+        if sock.open_count == 0 {
+            sock.closed = true;
+            if let Some(peer_idx) = sock.peer {
+                drop(sock);
+                let mut peer_sock = inner.sockets[peer_idx].lock().unwrap();
+                peer_sock.closed = true;
+            }
+            self.network.condvar.notify_all();
+        }
+    }
+
     fn virtual_write(&mut self, proc: &CapturedProcess, idx: usize, buf: &[u8]) -> nix::Result<usize> {
+        self.skip_syscall(proc);
         let inner = self.network.inner.lock().unwrap();
         let sock = inner.sockets[idx].lock().unwrap();
         let peer_idx = sock.peer.ok_or(nix::Error::ENOTCONN)?;
+        drop(sock);
         let mut peer_sock = inner.sockets[peer_idx].lock().unwrap();
+        if peer_sock.closed {
+            return Err(nix::Error::EPIPE);
+        }
         peer_sock.read_buf.extend_from_slice(buf);
         self.network.condvar.notify_all();
-        self.skip_syscall(proc);
         Ok(buf.len())
     }
 
@@ -1392,17 +1536,10 @@ impl Deterministic {
         }
     }
 
-    fn virtual_close(&mut self, proc: &CapturedProcess, idx: usize) -> nix::Result<c_int> {
-        let inner = self.network.inner.lock().unwrap();
-        let mut sock = inner.sockets[idx].lock().unwrap();
-        sock.closed = true;
-        if let Some(peer_idx) = sock.peer {
-            let mut peer_sock = inner.sockets[peer_idx].lock().unwrap();
-            peer_sock.closed = true;
-        }
-        self.network.condvar.notify_all();
-        self.skip_syscall(proc);
-        Ok(0)
+    fn virtual_close(&mut self, proc: &CapturedProcess, raw_fd: c_int, idx: usize) -> nix::Result<c_int> {
+        self.release_virtual_socket(idx);
+        let res = proc.close(raw_fd)?;
+        Ok(res as c_int)
     }
 
     unsafe fn read_sockaddr(&self, proc: &CapturedProcess, addr: *const libc::sockaddr, len: libc::socklen_t) -> nix::Result<SocketAddr> {
