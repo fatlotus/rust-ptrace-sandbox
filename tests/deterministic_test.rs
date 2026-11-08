@@ -78,6 +78,11 @@ fn do_test_random_gen_deterministic() {
     let fd2 = stdout2.lines().find(|l| l.contains("FdTest:")).unwrap();
     assert_eq!(fd1, fd2);
     assert_eq!(fd1, "FdTest: dup=42 poll=2 rev0=0 rev1=4 rev2=32 close=0,0,-1");
+
+    let tsc1 = stdout1.lines().find(|l| l.contains("Rdtsc:")).unwrap();
+    let tsc2 = stdout2.lines().find(|l| l.contains("Rdtsc:")).unwrap();
+    assert_eq!(tsc1, tsc2);
+    assert!(tsc1.ends_with("aux=0"));
 }
 
 fn do_test_random_gen_nondeterministic() {

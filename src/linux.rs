@@ -241,6 +241,16 @@ pub trait Linux<Fd> {
 
     /// is_verbose - check if verbose logging is enabled
     fn is_verbose(&self) -> bool;
+
+    /// is_deterministic - check if running in deterministic sandbox mode
+    fn is_deterministic(&self) -> bool {
+        false
+    }
+
+    /// emulate_rdtsc - check if a SIGSEGV at current RIP is caused by rdtsc/rdtscp and emulate it
+    fn emulate_rdtsc(&mut self, _proc: &CapturedProcess) -> bool {
+        false
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default)]

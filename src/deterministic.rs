@@ -1467,6 +1467,41 @@ impl Linux<DeterministicFd> for Deterministic {
     fn is_verbose(&self) -> bool {
         self.passthru.verbose
     }
+
+    fn is_deterministic(&self) -> bool {
+        true
+    }
+
+    fn emulate_rdtsc(&mut self, proc: &CapturedProcess) -> bool {
+        let mut regs = match proc.get_regs() {
+            Ok(r) => r,
+            Err(_) => return false,
+        };
+        let bytes = proc.read_memory(regs.rip as usize, 3);
+        let insn_len = if bytes.len() >= 2 && bytes[0] == 0x0f && bytes[1] == 0x31 {
+            2 // rdtsc
+        } else if bytes.len() >= 3 && bytes[0] == 0x0f && bytes[1] == 0x01 && bytes[2] == 0xf9 {
+            3 // rdtscp
+        } else {
+            return false;
+        };
+
+        let nanos = self.time_manager.get_time().as_nanos() as u64;
+        let tsc = 1_000_000_000u64.wrapping_add(nanos.wrapping_mul(3));
+        regs.rax = tsc & 0xffff_ffff;
+        regs.rdx = tsc >> 32;
+        if insn_len == 3 {
+            regs.rcx = 0; // IA32_TSC_AUX
+        }
+        regs.rip += insn_len;
+        if proc.set_regs(regs).is_err() {
+            return false;
+        }
+        if self.passthru.verbose {
+            println!("rdtsc() = {} (DETERMINISTIC)", tsc);
+        }
+        true
+    }
 }
 
 impl Deterministic {

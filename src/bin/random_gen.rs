@@ -76,5 +76,13 @@ fn main() {
             "FdTest: dup={} poll={} rev0={} rev1={} rev2={} close={},{},{}",
             dup_sfd, pret, pfds[0].revents, pfds[1].revents, pfds[2].revents, close1, close2, bad_close
         );
+
+        #[cfg(target_arch = "x86_64")]
+        {
+            let tsc = core::arch::x86_64::_rdtsc();
+            let mut aux: u32 = 123;
+            let tscp = core::arch::x86_64::__rdtscp(&mut aux);
+            println!("Rdtsc: tsc={} tscp={} aux={}", tsc, tscp, aux);
+        }
     }
 }

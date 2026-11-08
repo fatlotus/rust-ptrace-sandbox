@@ -51,6 +51,9 @@ where
                 if current != -1 {
                     libc::personality(current as u64 | libc::ADDR_NO_RANDOMIZE as u64);
                 }
+                if handler.is_deterministic() {
+                    libc::prctl(libc::PR_SET_TSC, libc::PR_TSC_SIGSEGV, 0, 0, 0);
+                }
             }
 
             let c_cmd = CString::new(cmd).unwrap();
@@ -282,6 +285,13 @@ where
                 break;
             }
             WaitStatus::Stopped(_, sig) => {
+                if sig == nix::sys::signal::Signal::SIGSEGV {
+                    let proc = crate::captured::CapturedProcess::new(pid);
+                    if handler.emulate_rdtsc(&proc) {
+                        let _ = ptrace::syscall(pid, None);
+                        continue;
+                    }
+                }
                 if sig == nix::sys::signal::Signal::SIGSEGV || sig == nix::sys::signal::Signal::SIGBUS || sig == nix::sys::signal::Signal::SIGILL || sig == nix::sys::signal::Signal::SIGABRT {
                     let proc = crate::captured::CapturedProcess::new(pid);
                     handler.on_exit(&proc);
