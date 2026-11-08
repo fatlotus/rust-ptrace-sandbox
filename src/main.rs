@@ -33,17 +33,25 @@ fn main() {
 
     while i < args.len() {
         let arg = &args[i];
-        if arg == "--sandbox" {
+        let stripped = arg.strip_prefix("--").or_else(|| arg.strip_prefix('-'));
+        if arg == "--" {
+            i += 1;
+            break;
+        } else if matches!(stripped, Some("sandbox")) {
             sandbox = true;
             i += 1;
-        } else if arg == "--passthru" || arg == "--no-sandbox" {
+        } else if matches!(stripped, Some("passthru" | "no-sandbox")) {
             sandbox = false;
             i += 1;
-        } else if arg == "--verbose" || arg == "-v" {
+        } else if matches!(stripped, Some("verbose" | "v")) {
             verbose = true;
             i += 1;
-        } else if arg == "--seed" || arg.starts_with("--seed=") {
-            let (val, step) = if let Some(v) = arg.strip_prefix("--seed=") {
+        } else if matches!(stripped, Some("help" | "h")) {
+            print_usage(&args[0]);
+            std::process::exit(0);
+        } else if matches!(stripped, Some(s) if s == "seed" || s.starts_with("seed=")) {
+            let s = stripped.unwrap();
+            let (val, step) = if let Some(v) = s.strip_prefix("seed=") {
                 (v, 1)
             } else if i + 1 < args.len() {
                 (args[i + 1].as_str(), 2)
@@ -56,8 +64,9 @@ fn main() {
                 std::process::exit(1);
             }));
             i += step;
-        } else if arg == "--jitter" || arg.starts_with("--jitter=") {
-            let (val, step) = if let Some(v) = arg.strip_prefix("--jitter=") {
+        } else if matches!(stripped, Some(s) if s == "jitter" || s.starts_with("jitter=")) {
+            let s = stripped.unwrap();
+            let (val, step) = if let Some(v) = s.strip_prefix("jitter=") {
                 (v, 1)
             } else if i + 1 < args.len() {
                 (args[i + 1].as_str(), 2)
@@ -70,9 +79,10 @@ fn main() {
                 std::process::exit(1);
             });
             i += step;
-        } else if arg == "--" {
-            i += 1;
-            break;
+        } else if arg.starts_with('-') && arg.len() > 1 {
+            eprintln!("Unknown option: {}", arg);
+            print_usage(&args[0]);
+            std::process::exit(1);
         } else {
             break;
         }

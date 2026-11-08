@@ -74,8 +74,11 @@ where
                 c_args.push(CString::new(*arg).unwrap());
             }
             
-            let _ = execvp(&c_cmd, &c_args);
-            panic!("Failed to execvp");
+            let Err(err) = execvp(&c_cmd, &c_args);
+            eprintln!("ptrace: failed to execute '{}': {}", cmd, err);
+            unsafe {
+                libc::_exit(127);
+            }
         }
         Err(e) => panic!("Fork failed: {}", e),
     }
@@ -148,10 +151,17 @@ where
 {
     if is_initial {
         // Initial wait for exec stop
-        waitpid(pid, None).expect("Initial wait failed");
-        
+        match waitpid(pid, None).expect("Initial wait failed") {
+            WaitStatus::Exited(_, code) => return Some(code),
+            WaitStatus::Signaled(_, sig, _) => return Some(128 + sig as i32),
+            _ => {}
+        }
+
         // Disable vDSO before we start tracing syscalls
-        let regs = ptrace::getregs(pid).expect("Failed to get regs for vDSO disable");
+        let regs = match ptrace::getregs(pid) {
+            Ok(r) => r,
+            Err(_) => return Some(127),
+        };
         vdso::disable_vdso(pid, regs.rsp);
         handler.on_exec(&crate::captured::CapturedProcess::new(pid), regs.rsp);
     } else {

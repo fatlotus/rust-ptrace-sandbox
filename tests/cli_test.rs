@@ -131,3 +131,37 @@ fn cli_sqlite3_database_operations() {
             || res.stdout.contains("pwrite(")
     );
 }
+
+#[test]
+fn cli_flags_and_missing_command_error() {
+    let ptrace_bin = env!("CARGO_BIN_EXE_ptrace");
+
+    // 1. Single-dash and double-dash --seed / --jitter flags work identically
+    let out = std::process::Command::new(ptrace_bin)
+        .args(["-seed=18", "--jitter=15ms", "/bin/echo", "seeded ok"])
+        .output()
+        .expect("Failed to run ptrace");
+    assert!(out.status.success());
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "seeded ok\n");
+
+    // 2. Non-existent command exits cleanly with 127 instead of panicking
+    let out = std::process::Command::new(ptrace_bin)
+        .args(["-seed=18", "--jitter=15ms", "./nonexistent_binary_12345"])
+        .output()
+        .expect("Failed to run ptrace");
+    assert_eq!(out.status.code(), Some(127));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("failed to execute './nonexistent_binary_12345'"));
+    assert!(!stderr.contains("panicked at"));
+
+    // 3. Unknown flag exits cleanly with code 1 and usage message
+    let out = std::process::Command::new(ptrace_bin)
+        .args(["--bogus-flag", "/bin/echo", "hi"])
+        .output()
+        .expect("Failed to run ptrace");
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("Unknown option: --bogus-flag"));
+    assert!(!stderr.contains("panicked at"));
+}
+
