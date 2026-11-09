@@ -80,7 +80,7 @@ pub fn scrub_auxv_random(proc: &crate::captured::CapturedProcess, sp: u64, rando
         }
     }
 
-    // Search auxv for AT_RANDOM (25)
+    // Search auxv for AT_RANDOM (25) and AT_HWCAP2 (26) on aarch64
     loop {
         let entry = proc.read_memory(addr as usize, 16);
         if entry.len() < 16 {
@@ -94,6 +94,13 @@ pub fn scrub_auxv_random(proc: &crate::captured::CapturedProcess, sp: u64, rando
         if key == 25 && val != 0 {
             // AT_RANDOM points to 16 random bytes on stack
             proc.write_memory(val as usize, random_bytes);
+        }
+        #[cfg(target_arch = "aarch64")]
+        if key == 26 {
+            // AT_HWCAP2: clear HWCAP2_RNG (bit 16) so userspace does not use RNDR/RNDRRS directly
+            const HWCAP2_RNG: u64 = 1 << 16;
+            let masked = val & !HWCAP2_RNG;
+            proc.write_memory((addr + 8) as usize, &masked.to_ne_bytes());
         }
         addr += 16;
     }

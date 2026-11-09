@@ -1,5 +1,5 @@
 use crate::linux::{Linux, PollFd};
-use crate::captured::CapturedProcess;
+use crate::captured::{ArchRegs, CapturedProcess};
 use crate::passthru::{Passthru, PassthruFd};
 use libc::{c_int, c_void, mode_t, off_t};
 use std::sync::{Arc, Mutex, Condvar};
@@ -806,23 +806,29 @@ impl Deterministic {
     }
 
     fn patch_stat(&self, proc: &CapturedProcess, addr: usize, path_hint: Option<&str>) {
-        // struct stat on x86_64:
-        // st_dev (0..8), st_ino (8..16), st_uid (28..28+4), st_gid (32..36),
-        // atime (72..88), mtime (88..104), ctime (104..120)
-        
-        let mut bytes = proc.read_memory(addr, 120); // Only need up to ctime
-        if bytes.len() < 120 { return; }
-        
-        let orig_ino = u64::from_ne_bytes(bytes[8..16].try_into().unwrap());
-        let det_ino = self.time_manager.get_deterministic_ino(orig_ino, path_hint);
-        bytes[0..8].copy_from_slice(&1u64.to_ne_bytes());
-        bytes[8..16].copy_from_slice(&det_ino.to_ne_bytes());
-        bytes[28..32].copy_from_slice(&1000u32.to_ne_bytes());
-        bytes[32..36].copy_from_slice(&1000u32.to_ne_bytes());
-        // Zero out timestamps (atim 72..88, mtim 88..104, ctim 104..120)
-        for i in 72..120 { bytes[i] = 0; }
-        
-        proc.write_memory(addr, &bytes);
+        let stat_size = std::mem::size_of::<libc::stat>();
+        let bytes = proc.read_memory(addr, stat_size);
+        if bytes.len() < stat_size {
+            return;
+        }
+
+        let mut st: libc::stat = unsafe { std::ptr::read_unaligned(bytes.as_ptr() as *const libc::stat) };
+        let det_ino = self.time_manager.get_deterministic_ino(st.st_ino as u64, path_hint);
+        st.st_dev = 1;
+        st.st_ino = det_ino as libc::ino_t;
+        st.st_uid = 1000;
+        st.st_gid = 1000;
+        st.st_atime = 0;
+        st.st_atime_nsec = 0;
+        st.st_mtime = 0;
+        st.st_mtime_nsec = 0;
+        st.st_ctime = 0;
+        st.st_ctime_nsec = 0;
+
+        let out_bytes = unsafe {
+            std::slice::from_raw_parts(&st as *const libc::stat as *const u8, stat_size)
+        };
+        proc.write_memory(addr, out_bytes);
         if self.passthru.verbose {
             println!("patch_stat({:#x}) (DETERMINISTIC)", addr);
         }
@@ -1057,7 +1063,7 @@ impl Linux<DeterministicFd> for Deterministic {
         let regs = proc.get_regs()?;
         let res = self.passthru.stat(proc, pathname)?;
         if res == 0 {
-            self.patch_stat(proc, regs.rsi as usize, Some(pathname));
+            self.patch_stat(proc, regs.arg2() as usize, Some(pathname));
         }
         Ok(res)
     }
@@ -1066,7 +1072,7 @@ impl Linux<DeterministicFd> for Deterministic {
         let regs = proc.get_regs()?;
         let res = self.passthru.lstat(proc, pathname)?;
         if res == 0 {
-            self.patch_stat(proc, regs.rsi as usize, Some(pathname));
+            self.patch_stat(proc, regs.arg2() as usize, Some(pathname));
         }
         Ok(res)
     }
@@ -1080,13 +1086,13 @@ impl Linux<DeterministicFd> for Deterministic {
                 let res = self.passthru.fstat(proc, f)?;
                 if res == 0 {
                     let hint = self.fd_path_hint(proc, raw);
-                    self.patch_stat(proc, regs.rsi as usize, hint.as_deref());
+                    self.patch_stat(proc, regs.arg2() as usize, hint.as_deref());
                 }
                 Ok(res)
             }
             DeterministicFd::Virtualized(_, _) => {
                 let regs = proc.get_regs()?;
-                self.write_virtual_socket_stat(proc, regs.rsi)
+                self.write_virtual_socket_stat(proc, regs.arg2())
             }
         }
     }
@@ -1096,7 +1102,7 @@ impl Linux<DeterministicFd> for Deterministic {
         if let Some(DeterministicFd::Virtualized(_, _)) = dirfd {
             if (flags & libc::AT_EMPTY_PATH) != 0 && pathname.is_empty() {
                 let regs = proc.get_regs()?;
-                return self.write_virtual_socket_stat(proc, regs.rdx);
+                return self.write_virtual_socket_stat(proc, regs.arg3());
             }
         }
         let p_dirfd = dirfd.and_then(|d| d.as_passthru_mut());
@@ -1109,7 +1115,7 @@ impl Linux<DeterministicFd> for Deterministic {
             } else {
                 raw_dirfd.and_then(|r| self.fd_path_hint(proc, r))
             };
-            self.patch_stat(proc, regs.rdx as usize, hint.as_deref());
+            self.patch_stat(proc, regs.arg3() as usize, hint.as_deref());
         }
         Ok(res)
     }
@@ -1120,26 +1126,21 @@ impl Linux<DeterministicFd> for Deterministic {
             if (flags & libc::AT_EMPTY_PATH) != 0 && pathname.is_empty() {
                 let regs = proc.get_regs()?;
                 self.skip_syscall(proc);
-                if regs.r8 == 0 {
+                if regs.arg5() == 0 {
                     return Err(nix::Error::EFAULT);
                 }
-                let mut stx: libc::statx = unsafe { std::mem::zeroed() };
-                stx.stx_mask = mask;
-                stx.stx_blksize = 4096;
-                stx.stx_nlink = 1;
-                stx.stx_uid = 1000;
-                stx.stx_gid = 1000;
-                stx.stx_mode = (libc::S_IFSOCK | 0o666) as u16;
-                stx.stx_ino = 1;
-                stx.stx_dev_major = 0;
-                stx.stx_dev_minor = 1;
-                let bytes = unsafe {
-                    std::slice::from_raw_parts(
-                        &stx as *const libc::statx as *const u8,
-                        std::mem::size_of::<libc::statx>(),
-                    )
-                };
-                proc.write_memory(regs.r8 as usize, bytes);
+                let mut buf = [0u8; 256];
+                buf[0..4].copy_from_slice(&mask.to_ne_bytes()); // stx_mask
+                buf[4..8].copy_from_slice(&4096u32.to_ne_bytes()); // stx_blksize
+                buf[16..20].copy_from_slice(&1u32.to_ne_bytes()); // stx_nlink
+                buf[20..24].copy_from_slice(&1000u32.to_ne_bytes()); // stx_uid
+                buf[24..28].copy_from_slice(&1000u32.to_ne_bytes()); // stx_gid
+                let mode = ((libc::S_IFSOCK | 0o666) as u16).to_ne_bytes();
+                buf[28..30].copy_from_slice(&mode); // stx_mode
+                buf[32..40].copy_from_slice(&1u64.to_ne_bytes()); // stx_ino
+                buf[136..140].copy_from_slice(&0u32.to_ne_bytes()); // stx_dev_major
+                buf[140..144].copy_from_slice(&1u32.to_ne_bytes()); // stx_dev_minor
+                proc.write_memory(regs.arg5() as usize, &buf);
                 return Ok(0);
             }
         }
@@ -1153,7 +1154,7 @@ impl Linux<DeterministicFd> for Deterministic {
             } else {
                 raw_dirfd.and_then(|r| self.fd_path_hint(proc, r))
             };
-            self.patch_statx(proc, regs.r8 as usize, hint.as_deref());
+            self.patch_statx(proc, regs.arg5() as usize, hint.as_deref());
         }
         Ok(res)
     }
@@ -1181,7 +1182,7 @@ impl Linux<DeterministicFd> for Deterministic {
 
     fn clock_gettime(&mut self, proc: &CapturedProcess, clk_id: libc::clockid_t) -> nix::Result<c_int> {
         let regs = proc.get_regs()?;
-        let tp_addr = regs.rsi as usize;
+        let tp_addr = regs.arg2() as usize;
         self.skip_syscall(proc);
         if tp_addr == 0 {
             return Err(nix::Error::EFAULT);
@@ -1629,13 +1630,14 @@ impl Linux<DeterministicFd> for Deterministic {
         if event_addr == 0 {
             return Err(nix::Error::EFAULT);
         }
-        // struct epoll_event on x86_64 is packed: u32 events (0..4), u64 data (4..12)
-        let bytes = proc.read_memory(event_addr as usize, 12);
-        if bytes.len() < 12 {
+        let ev_size = std::mem::size_of::<libc::epoll_event>();
+        let bytes = proc.read_memory(event_addr as usize, ev_size);
+        if bytes.len() < ev_size {
             return Err(nix::Error::EFAULT);
         }
-        let events = u32::from_ne_bytes(bytes[0..4].try_into().unwrap());
-        let data = u64::from_ne_bytes(bytes[4..12].try_into().unwrap());
+        let ev: libc::epoll_event = unsafe { std::ptr::read_unaligned(bytes.as_ptr() as *const libc::epoll_event) };
+        let events = ev.events;
+        let data = ev.u64;
 
         let target = match target_fd {
             Some(DeterministicFd::Virtualized(_, idx)) => EpollTarget::VirtualSocket(*idx),
@@ -1779,10 +1781,16 @@ impl Linux<DeterministicFd> for Deterministic {
                     }
                     drop(inner);
 
-                    let mut out_bytes = Vec::with_capacity(ready.len() * 12);
+                    let ev_size = std::mem::size_of::<libc::epoll_event>();
+                    let mut out_bytes = Vec::with_capacity(ready.len() * ev_size);
                     for &(_, rev, data, _, _, _) in &ready {
-                        out_bytes.extend_from_slice(&rev.to_ne_bytes());
-                        out_bytes.extend_from_slice(&data.to_ne_bytes());
+                        let mut ev: libc::epoll_event = unsafe { std::mem::zeroed() };
+                        ev.events = rev;
+                        ev.u64 = data;
+                        let ev_bytes = unsafe {
+                            std::slice::from_raw_parts(&ev as *const libc::epoll_event as *const u8, ev_size)
+                        };
+                        out_bytes.extend_from_slice(ev_bytes);
                     }
                     if !out_bytes.is_empty() {
                         proc.write_memory(events_addr as usize, &out_bytes);
@@ -1882,6 +1890,11 @@ impl Linux<DeterministicFd> for Deterministic {
         self.passthru.unlink(proc, pathname)
     }
 
+    fn unlinkat(&mut self, proc: &CapturedProcess, dirfd: Option<&mut DeterministicFd>, pathname: &str, flags: c_int) -> nix::Result<c_int> {
+        let p_dirfd = dirfd.and_then(|d| d.as_passthru_mut());
+        self.passthru.unlinkat(proc, p_dirfd, pathname, flags)
+    }
+
     fn pwrite(&mut self, proc: &CapturedProcess, fd: &mut DeterministicFd, buf: &[u8], offset: off_t) -> nix::Result<usize> {
         match fd {
             DeterministicFd::Passthru(f) | DeterministicFd::VirtualRandom(f) | DeterministicFd::VirtualUuid(f, _) => {
@@ -1966,8 +1979,8 @@ impl Linux<DeterministicFd> for Deterministic {
 
     fn gettimeofday(&mut self, proc: &CapturedProcess) -> nix::Result<c_int> {
         let regs = proc.get_regs()?;
-        let tv_addr = regs.rdi as usize;
-        let tz_addr = regs.rsi as usize;
+        let tv_addr = regs.arg1() as usize;
+        let tz_addr = regs.arg2() as usize;
         self.skip_syscall(proc);
         
         if tv_addr != 0 {
@@ -2021,7 +2034,7 @@ impl Linux<DeterministicFd> for Deterministic {
 
     fn uname(&mut self, proc: &CapturedProcess) -> nix::Result<c_int> {
         let regs = proc.get_regs()?;
-        let addr = regs.rdi as usize;
+        let addr = regs.arg1() as usize;
         self.skip_syscall(proc);
         if addr == 0 {
             return Err(nix::Error::EFAULT);
@@ -2038,7 +2051,7 @@ impl Linux<DeterministicFd> for Deterministic {
         copy_cstr(&mut uts.nodename, b"sandbox");
         copy_cstr(&mut uts.release, b"6.0.0-deterministic");
         copy_cstr(&mut uts.version, b"#1 SMP DETERMINISTIC");
-        copy_cstr(&mut uts.machine, b"x86_64");
+        copy_cstr(&mut uts.machine, std::env::consts::ARCH.as_bytes());
 
         let bytes = unsafe {
             std::slice::from_raw_parts(
@@ -2055,14 +2068,14 @@ impl Linux<DeterministicFd> for Deterministic {
 
     fn sysinfo(&mut self, proc: &CapturedProcess) -> nix::Result<c_int> {
         let regs = proc.get_regs()?;
-        let addr = regs.rdi as usize;
+        let addr = regs.arg1() as usize;
         self.skip_syscall(proc);
         if addr == 0 {
             return Err(nix::Error::EFAULT);
         }
         let mut info: libc::sysinfo = unsafe { std::mem::zeroed() };
         let current_time = self.time_manager.get_time();
-        info.uptime = current_time.as_secs().saturating_sub(946684800) as i64;
+        info.uptime = current_time.as_secs().saturating_sub(946684800) as _;
         info.totalram = 1024 * 1024 * 1024;
         info.freeram = 512 * 1024 * 1024;
         info.procs = 1;
@@ -2099,7 +2112,7 @@ impl Linux<DeterministicFd> for Deterministic {
 
     fn times(&mut self, proc: &CapturedProcess) -> nix::Result<c_int> {
         let regs = proc.get_regs()?;
-        let addr = regs.rdi as usize;
+        let addr = regs.arg1() as usize;
         if addr != 0 {
             // Zero out the tms struct (4 fields of 8 bytes)
             let buf = vec![0u8; 32];
@@ -2604,6 +2617,7 @@ impl Linux<DeterministicFd> for Deterministic {
         true
     }
 
+    #[cfg(target_arch = "x86_64")]
     fn emulate_rdtsc(&mut self, proc: &CapturedProcess) -> bool {
         let mut regs = match proc.get_regs() {
             Ok(r) => r,
@@ -2677,6 +2691,51 @@ impl Linux<DeterministicFd> for Deterministic {
         } else {
             false
         }
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    fn emulate_rdtsc(&mut self, proc: &CapturedProcess) -> bool {
+        let mut regs = match proc.get_regs() {
+            Ok(r) => r,
+            Err(_) => return false,
+        };
+        let bytes = proc.read_memory(regs.pc as usize, 4);
+        if bytes.len() < 4 {
+            return false;
+        }
+        let insn = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+        // MRS <Xt>, <sysreg>: bits [31:20] == 0xd53
+        if (insn & 0xfff0_0000) != 0xd530_0000 {
+            return false;
+        }
+        let rt = (insn & 0x1f) as usize;
+        let sysreg = (insn >> 5) & 0x7fff;
+        let val = match sysreg {
+            // CNTVCT_EL0 (S3_3_C14_C0_2 = 0x5f02) or CNTVCTSS_EL0 (S3_3_C14_C0_6 = 0x5f06)
+            0x5f02 | 0x5f06 => self.time_manager.next_tsc(),
+            // CNTFRQ_EL0 (S3_3_C14_C0_0 = 0x5f00): virtual 1 GHz frequency
+            0x5f00 => 1_000_000_000u64,
+            // RNDR (S3_3_C2_C4_0 = 0x5920) or RNDRRS (S3_3_C2_C4_1 = 0x5921)
+            0x5920 | 0x5921 => {
+                let mut buf = [0u8; 8];
+                self.time_manager.fill_random_bytes(&mut buf);
+                // Clear NZCV flags (Z=0 indicates success for RNDR/RNDRRS)
+                regs.pstate &= !0xf000_0000;
+                u64::from_ne_bytes(buf)
+            }
+            _ => return false,
+        };
+        if rt < 31 {
+            regs.regs[rt] = val;
+        }
+        regs.pc += 4;
+        if proc.set_regs(regs).is_err() {
+            return false;
+        }
+        if self.passthru.verbose {
+            println!("mrs(sysreg={:#x}) = {:#x} (DETERMINISTIC)", sysreg, val);
+        }
+        true
     }
 }
 

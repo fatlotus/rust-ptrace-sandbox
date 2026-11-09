@@ -161,6 +161,9 @@ pub trait Linux<Fd> {
     /// unlink - delete a name and possibly the file it refers to
     fn unlink(&mut self, proc: &CapturedProcess, pathname: &str) -> nix::Result<c_int>;
 
+    /// unlinkat - delete a name and possibly the file it refers to relative to a directory fd
+    fn unlinkat(&mut self, proc: &CapturedProcess, dirfd: Option<&mut Fd>, pathname: &str, flags: c_int) -> nix::Result<c_int>;
+
     /// pwrite64 - write to a file descriptor at a given offset
     fn pwrite(&mut self, proc: &CapturedProcess, fd: &mut Fd, buf: &[u8], offset: off_t) -> nix::Result<usize>;
 
@@ -385,7 +388,7 @@ pub trait Linux<Fd> {
 
     /// epoll_wait / epoll_pwait - wait for an I/O event on an epoll file descriptor
     fn epoll_wait(&mut self, proc: &CapturedProcess, epfd: c_int, events_addr: u64, maxevents: c_int, timeout_ms: c_int) -> nix::Result<c_int> {
-        let res = proc.syscall(libc::SYS_epoll_wait as u64, epfd as u64, events_addr, maxevents as u64, timeout_ms as i64 as u64, 0, 0)?;
+        let res = proc.syscall(libc::SYS_epoll_pwait as u64, epfd as u64, events_addr, maxevents as u64, timeout_ms as i64 as u64, 0, 8)?;
         Ok(res as c_int)
     }
 

@@ -2,7 +2,7 @@
 
 Imagine you are trying to debug a flaky unit test that fails once every hundred runs. Wouldn't it be nice if you could replay the exact same run of the test to see what went wrong?
 
-NoDice (`nodice`) is a command-line tool for Linux `x86_64` that runs programs inside a deterministic sandbox. It searches for concurrency bugs by varying seeds and timing jitter across runs, and gives you a command to replay any failing run with the same thread and network ordering.
+NoDice (`nodice`) is a command-line tool for Linux (`x86_64` and `aarch64`) that runs programs inside a deterministic sandbox. It searches for concurrency bugs by varying seeds and timing jitter across runs, and gives you a command to replay any failing run with the same thread and network ordering.
 
 ## Installation
 
@@ -61,12 +61,12 @@ See [`example/`](./example/README.md) for a walkthrough that finds and reproduce
 
 `nodice` uses `ptrace` to intercept system calls and manually control the ordering of all threads, removing all sources of non-determinism. Then it introduces them back in, in a deterministic way:
 
-1. **Removing non-determinism**: `nodice` intercepts every system call made by the target process and its child threads, pins execution to a single CPU core, disables ASLR and the kernel vDSO, and traps unprivileged instructions that expose host state (`RDTSC`, `RDTSCP`, `CPUID`, `RDRAND`, `RDSEED`). Clocks, timers, `futex` queues, pipes, and loopback TCP sockets (`127.0.0.1` along with `epoll`, `poll`, and `select`) are handled in user space so `nodice` decides which thread wakes up next. Virtual time advances immediately when all runnable threads are blocked on timers, so sleeps do not wait on the wall clock.
+1. **Removing non-determinism**: `nodice` intercepts every system call made by the target process and its child threads, pins execution to a single CPU core, disables ASLR and the kernel vDSO, and traps unprivileged instructions that expose host state (`RDTSC`, `RDTSCP`, `CPUID`, `RDRAND`, and `RDSEED` on `x86_64`; `MRS` reads of hardware random and counter registers on `aarch64`). Clocks, timers, `futex` queues, pipes, and loopback TCP sockets (`127.0.0.1` along with `epoll`, `poll`, and `select`) are handled in user space so `nodice` decides which thread wakes up next. Virtual time advances immediately when all runnable threads are blocked on timers, so sleeps do not wait on the wall clock.
 2. **Reintroducing deterministic variation**: A ChaCha PRNG seeded by `--seed` supplies `/dev/urandom`, `getrandom`, and initial `AT_RANDOM` bytes (which runtimes like Go use for internal scheduler tie-breaking). When `--jitter` is enabled, `nodice` uses the same PRNG to assign transit delays to loopback packets and shuffle ready `epoll` events. Because every decision comes from the seed, running the command again with the same `--seed` and `--jitter` produces the same thread and message interleaving.
 
 ## Limitations
 
-- **Platform**: Linux `x86_64` only.
+- **Platform**: Linux (`x86_64` and `aarch64`).
 - **Overhead**: Every system call goes through a `ptrace` context switch, so syscall-heavy programs run slower than native execution.
 - **Adding logs**: Execution is deterministic for a given sequence of system calls. If you add logging that performs extra `write` calls or allocates more memory, the schedule remains identical up to that point, though thread ordering after the new system calls may shift.
 
@@ -74,4 +74,17 @@ See [`example/`](./example/README.md) for a walkthrough that finds and reproduce
 
 ```bash
 cargo test
+```
+
+To cross-compile and run the full `aarch64` test suite locally inside an ARM64 Linux kernel under QEMU (`qemu-system-aarch64`):
+
+```bash
+./scripts/setup-qemu-arm64.sh
+./scripts/test-arm64-qemu.sh
+```
+
+Or run individual ARM64 test targets via Cargo's configured QEMU runner:
+
+```bash
+cargo test --target aarch64-unknown-linux-gnu --test determinism_test
 ```

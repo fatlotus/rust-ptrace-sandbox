@@ -94,15 +94,9 @@ sandbox_test!(
                 iov_len: part2.len(),
             },
         ];
-        let send_hdr = libc::msghdr {
-            msg_name: std::ptr::null_mut(),
-            msg_namelen: 0,
-            msg_iov: send_iov.as_mut_ptr(),
-            msg_iovlen: send_iov.len(),
-            msg_control: std::ptr::null_mut(),
-            msg_controllen: 0,
-            msg_flags: 0,
-        };
+        let mut send_hdr: libc::msghdr = std::mem::zeroed();
+        send_hdr.msg_iov = send_iov.as_mut_ptr();
+        send_hdr.msg_iovlen = send_iov.len() as _;
         let sent = libc::sendmsg(cfd, &send_hdr, 0);
         assert_eq!(sent, 6);
 
@@ -129,15 +123,9 @@ sandbox_test!(
                 iov_len: r2.len(),
             },
         ];
-        let mut recv_hdr = libc::msghdr {
-            msg_name: std::ptr::null_mut(),
-            msg_namelen: 0,
-            msg_iov: recv_iov.as_mut_ptr(),
-            msg_iovlen: recv_iov.len(),
-            msg_control: std::ptr::null_mut(),
-            msg_controllen: 0,
-            msg_flags: 0,
-        };
+        let mut recv_hdr: libc::msghdr = std::mem::zeroed();
+        recv_hdr.msg_iov = recv_iov.as_mut_ptr();
+        recv_hdr.msg_iovlen = recv_iov.len() as _;
         let recvd = libc::recvmsg(sfd, &mut recv_hdr, 0);
         assert_eq!(recvd, 6);
 
@@ -224,18 +212,20 @@ sandbox_test!(
             0
         );
 
-        let mut stx: libc::statx = std::mem::zeroed();
+        const STATX_BASIC_STATS: libc::c_uint = 0x000007ff;
+        let mut stx = [0u8; 256];
         assert_eq!(
             libc::syscall(
                 libc::SYS_statx,
                 asock,
                 b"\0".as_ptr(),
                 libc::AT_EMPTY_PATH,
-                libc::STATX_BASIC_STATS,
-                &mut stx as *mut libc::statx,
+                STATX_BASIC_STATS,
+                stx.as_mut_ptr(),
             ),
             0
         );
+        let stx_mode = u16::from_ne_bytes(stx[28..30].try_into().unwrap());
 
         libc::close(asock);
         libc::close(csock);
@@ -246,7 +236,7 @@ sandbox_test!(
             tiny_buf[4],
             st_fstat.st_mode & libc::S_IFMT,
             st_fstatat.st_mode & libc::S_IFMT,
-            (stx.stx_mode as u32) & libc::S_IFMT,
+            (stx_mode as u32) & libc::S_IFMT,
         )
     },
     |&(tiny_len, sentinel, mode1, mode2, mode3)| {

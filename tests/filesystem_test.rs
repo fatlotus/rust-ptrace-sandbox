@@ -13,8 +13,8 @@ virtualized_test!(
         let mut st_fstat: libc::stat = std::mem::zeroed();
         let mut st_fstatat: libc::stat = std::mem::zeroed();
 
-        assert_eq!(libc::stat(path.as_ptr() as *const i8, &mut st_stat), 0);
-        assert_eq!(libc::lstat(path.as_ptr() as *const i8, &mut st_lstat), 0);
+        assert_eq!(libc::stat(path.as_ptr() as *const libc::c_char, &mut st_stat), 0);
+        assert_eq!(libc::lstat(path.as_ptr() as *const libc::c_char, &mut st_lstat), 0);
 
         let f = File::open("/etc/passwd").unwrap();
         assert_eq!(libc::fstat(f.as_raw_fd(), &mut st_fstat), 0);
@@ -59,39 +59,40 @@ virtualized_test!(
 virtualized_test!(
     statx_metadata_normalization,
     || unsafe {
-        let mut stx_path: libc::statx = std::mem::zeroed();
+        const STATX_BASIC_STATS: libc::c_uint = 0x000007ff;
+        let mut stx_path = [0u8; 256];
         let r1 = libc::syscall(
             libc::SYS_statx,
             libc::AT_FDCWD,
             b"/etc/passwd\0".as_ptr(),
             0,
-            libc::STATX_BASIC_STATS,
-            &mut stx_path as *mut libc::statx,
+            STATX_BASIC_STATS,
+            stx_path.as_mut_ptr(),
         );
         assert_eq!(r1, 0);
 
         let f = File::open("/etc/passwd").unwrap();
-        let mut stx_fd: libc::statx = std::mem::zeroed();
+        let mut stx_fd = [0u8; 256];
         let r2 = libc::syscall(
             libc::SYS_statx,
             f.as_raw_fd(),
             b"\0".as_ptr(),
             libc::AT_EMPTY_PATH,
-            libc::STATX_BASIC_STATS,
-            &mut stx_fd as *mut libc::statx,
+            STATX_BASIC_STATS,
+            stx_fd.as_mut_ptr(),
         );
         assert_eq!(r2, 0);
 
-        (
-            stx_path.stx_ino,
-            stx_fd.stx_ino,
-            stx_path.stx_uid,
-            stx_path.stx_gid,
-            stx_path.stx_mtime.tv_sec,
-            stx_path.stx_btime.tv_sec,
-            stx_path.stx_dev_major,
-            stx_path.stx_dev_minor,
-        )
+        let ino1 = u64::from_ne_bytes(stx_path[32..40].try_into().unwrap());
+        let ino2 = u64::from_ne_bytes(stx_fd[32..40].try_into().unwrap());
+        let uid = u32::from_ne_bytes(stx_path[20..24].try_into().unwrap());
+        let gid = u32::from_ne_bytes(stx_path[24..28].try_into().unwrap());
+        let btime = i64::from_ne_bytes(stx_path[80..88].try_into().unwrap());
+        let mtime = i64::from_ne_bytes(stx_path[112..120].try_into().unwrap());
+        let dev_maj = u32::from_ne_bytes(stx_path[136..140].try_into().unwrap());
+        let dev_min = u32::from_ne_bytes(stx_path[140..144].try_into().unwrap());
+
+        (ino1, ino2, uid, gid, mtime, btime, dev_maj, dev_min)
     },
     |&(ino1, ino2, uid, gid, mtime, btime, dev_maj, dev_min)| {
         assert!(ino1 > 0);
@@ -178,13 +179,16 @@ sandbox_test!(
         );
         libc::close(urand_fd2);
 
-        // 3. SYS_creat and SYS_unlink
+        // 3. creat and unlink
         let tmp_path = b"/tmp/ptrace_creat_test.txt\0";
+        #[cfg(target_arch = "x86_64")]
         let cfd = libc::syscall(libc::SYS_creat, tmp_path.as_ptr(), 0o600) as i32;
+        #[cfg(not(target_arch = "x86_64"))]
+        let cfd = libc::creat(tmp_path.as_ptr() as *const libc::c_char, 0o600);
         assert!(cfd >= 0);
         assert_eq!(libc::write(cfd, b"abc".as_ptr() as *const libc::c_void, 3), 3);
         libc::close(cfd);
-        assert_eq!(libc::unlink(tmp_path.as_ptr() as *const i8), 0);
+        assert_eq!(libc::unlink(tmp_path.as_ptr() as *const libc::c_char), 0);
 
         (urand_buf, urand_buf2)
     },
@@ -317,7 +321,7 @@ sandbox_test!(
     || unsafe {
         let path = b"/tmp/ptrace_pio_test.dat\0";
         let fd = libc::open(
-            path.as_ptr() as *const i8,
+            path.as_ptr() as *const libc::c_char,
             libc::O_CREAT | libc::O_RDWR | libc::O_TRUNC,
             0o600,
         );
@@ -340,7 +344,7 @@ sandbox_test!(
             11
         );
         assert_eq!(libc::close(fd), 0);
-        assert_eq!(libc::unlink(path.as_ptr() as *const i8), 0);
+        assert_eq!(libc::unlink(path.as_ptr() as *const libc::c_char), 0);
 
         let cwd = std::env::current_dir().unwrap();
         let has_entries = std::fs::read_dir(&cwd).unwrap().next().is_some();

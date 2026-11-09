@@ -1,5 +1,5 @@
 use crate::linux::{Linux, PollFd};
-use crate::captured::CapturedProcess;
+use crate::captured::{ArchRegs, CapturedProcess};
 use libc::{c_int, c_void, mode_t, off_t};
 
 #[derive(Clone, Copy)]
@@ -70,7 +70,7 @@ impl Linux<PassthruFd> for Passthru {
 
     fn write(&mut self, proc: &CapturedProcess, fd: &mut PassthruFd, buf: &[u8]) -> nix::Result<usize> {
         let regs = proc.get_regs()?;
-        let res = proc.write(fd.0, regs.rsi, buf.len())?;
+        let res = proc.write(fd.0, regs.arg2(), buf.len())?;
         if self.verbose {
             println!("write({}, {:?}, {}) = {}", fd.0, String::from_utf8_lossy(buf), buf.len(), res);
         }
@@ -79,8 +79,8 @@ impl Linux<PassthruFd> for Passthru {
 
     fn read(&mut self, proc: &CapturedProcess, fd: &mut PassthruFd, count: usize) -> nix::Result<Vec<u8>> {
         let regs = proc.get_regs()?;
-        let res = proc.read(fd.0, regs.rsi, count)?;
-        let buf = proc.read_memory(regs.rsi as usize, res as usize);
+        let res = proc.read(fd.0, regs.arg2(), count)?;
+        let buf = proc.read_memory(regs.arg2() as usize, res as usize);
         if self.verbose {
             println!("read({}, ..., {}) = {}", fd.0, count, res);
         }
@@ -89,7 +89,7 @@ impl Linux<PassthruFd> for Passthru {
 
     fn open(&mut self, proc: &CapturedProcess, pathname: &str, flags: c_int, mode: mode_t) -> nix::Result<PassthruFd> {
         let regs = proc.get_regs()?;
-        let res = proc.open(regs.rdi, flags, mode)?;
+        let res = proc.open(regs.arg1(), flags, mode)?;
         if self.verbose {
             println!("open({:?}, {}, {}) = {}", pathname, flags, mode, res);
         }
@@ -99,7 +99,7 @@ impl Linux<PassthruFd> for Passthru {
     fn openat(&mut self, proc: &CapturedProcess, dirfd: Option<&mut PassthruFd>, pathname: &str, flags: c_int, mode: mode_t) -> nix::Result<PassthruFd> {
         let regs = proc.get_regs()?;
         let dirfd_val = dirfd.map(|fd| fd.0).unwrap_or(libc::AT_FDCWD);
-        let res = proc.openat(dirfd_val, regs.rsi, flags, mode)?;
+        let res = proc.openat(dirfd_val, regs.arg2(), flags, mode)?;
         if self.verbose {
             println!("openat({}, {:?}, {}, {}) = {}", dirfd_val, pathname, flags, mode, res);
         }
@@ -116,7 +116,7 @@ impl Linux<PassthruFd> for Passthru {
 
     fn stat(&mut self, proc: &CapturedProcess, pathname: &str) -> nix::Result<c_int> {
         let regs = proc.get_regs()?;
-        let res = proc.stat(regs.rdi, regs.rsi)?;
+        let res = proc.stat(regs.arg1(), regs.arg2())?;
         if self.verbose {
             println!("stat({:?}, ...) = {}", pathname, res);
         }
@@ -125,7 +125,7 @@ impl Linux<PassthruFd> for Passthru {
 
     fn lstat(&mut self, proc: &CapturedProcess, pathname: &str) -> nix::Result<c_int> {
         let regs = proc.get_regs()?;
-        let res = proc.lstat(regs.rdi, regs.rsi)?;
+        let res = proc.lstat(regs.arg1(), regs.arg2())?;
         if self.verbose {
             println!("lstat({:?}, ...) = {}", pathname, res);
         }
@@ -134,7 +134,7 @@ impl Linux<PassthruFd> for Passthru {
 
     fn fstat(&mut self, proc: &CapturedProcess, fd: &mut PassthruFd) -> nix::Result<c_int> {
         let regs = proc.get_regs()?;
-        let res = proc.fstat(fd.0, regs.rsi)?;
+        let res = proc.fstat(fd.0, regs.arg2())?;
         if self.verbose {
             println!("fstat({}, ...) = {}", fd.0, res);
         }
@@ -144,7 +144,7 @@ impl Linux<PassthruFd> for Passthru {
     fn newfstatat(&mut self, proc: &CapturedProcess, dirfd: Option<&mut PassthruFd>, pathname: &str, flags: c_int) -> nix::Result<c_int> {
         let regs = proc.get_regs()?;
         let dirfd_val = dirfd.map(|fd| fd.0).unwrap_or(libc::AT_FDCWD);
-        let res = proc.newfstatat(dirfd_val, regs.rsi, regs.rdx, flags)?;
+        let res = proc.newfstatat(dirfd_val, regs.arg2(), regs.arg3(), flags)?;
         if self.verbose {
             println!("newfstatat({}, {:?}, ..., {}) = {}", dirfd_val, pathname, flags, res);
         }
@@ -154,7 +154,7 @@ impl Linux<PassthruFd> for Passthru {
     fn statx(&mut self, proc: &CapturedProcess, dirfd: Option<&mut PassthruFd>, pathname: &str, flags: c_int, mask: libc::c_uint) -> nix::Result<c_int> {
         let regs = proc.get_regs()?;
         let dirfd_val = dirfd.map(|fd| fd.0).unwrap_or(libc::AT_FDCWD);
-        let res = proc.statx(dirfd_val, regs.rsi, flags, mask, regs.r8)?;
+        let res = proc.statx(dirfd_val, regs.arg2(), flags, mask, regs.arg5())?;
         if self.verbose {
             println!("statx({}, {:?}, {}, {}, ...) = {}", dirfd_val, pathname, flags, mask, res);
         }
@@ -204,7 +204,7 @@ impl Linux<PassthruFd> for Passthru {
 
     fn clock_gettime(&mut self, proc: &CapturedProcess, clk_id: libc::clockid_t) -> nix::Result<c_int> {
         let regs = proc.get_regs()?;
-        let res = proc.clock_gettime(clk_id, regs.rsi)?;
+        let res = proc.clock_gettime(clk_id, regs.arg2())?;
         if self.verbose {
             println!("clock_gettime({}, ...) = {}", clk_id, res);
         }
@@ -242,7 +242,7 @@ impl Linux<PassthruFd> for Passthru {
 
     fn bind(&mut self, proc: &CapturedProcess, fd: &mut PassthruFd, addr: *const libc::sockaddr, len: libc::socklen_t) -> nix::Result<c_int> {
         let regs = proc.get_regs()?;
-        let res = proc.bind(fd.0, regs.rsi, len)?;
+        let res = proc.bind(fd.0, regs.arg2(), len)?;
         if self.verbose {
             println!("bind({}, {:?}, {}) = {}", fd.0, addr, len, res);
         }
@@ -259,7 +259,7 @@ impl Linux<PassthruFd> for Passthru {
 
     fn accept(&mut self, proc: &CapturedProcess, fd: &mut PassthruFd, addr: *mut libc::sockaddr, len: *mut libc::socklen_t) -> nix::Result<PassthruFd> {
         let regs = proc.get_regs()?;
-        let res = proc.accept(fd.0, regs.rsi, regs.rdx)?;
+        let res = proc.accept(fd.0, regs.arg2(), regs.arg3())?;
         if self.verbose {
             println!("accept({}, {:?}, {:?}) = {}", fd.0, addr, len, res);
         }
@@ -268,7 +268,7 @@ impl Linux<PassthruFd> for Passthru {
 
     fn accept4(&mut self, proc: &CapturedProcess, fd: &mut PassthruFd, addr: *mut libc::sockaddr, len: *mut libc::socklen_t, flags: c_int) -> nix::Result<PassthruFd> {
         let regs = proc.get_regs()?;
-        let res = proc.accept4(fd.0, regs.rsi, regs.rdx, flags)?;
+        let res = proc.accept4(fd.0, regs.arg2(), regs.arg3(), flags)?;
         if self.verbose {
             println!("accept4({}, {:?}, {:?}, {}) = {}", fd.0, addr, len, flags, res);
         }
@@ -277,7 +277,7 @@ impl Linux<PassthruFd> for Passthru {
 
     fn connect(&mut self, proc: &CapturedProcess, fd: &mut PassthruFd, addr: *const libc::sockaddr, len: libc::socklen_t) -> nix::Result<c_int> {
         let regs = proc.get_regs()?;
-        let res = proc.connect(fd.0, regs.rsi, len)?;
+        let res = proc.connect(fd.0, regs.arg2(), len)?;
         if self.verbose {
             println!("connect({}, {:?}, {}) = {}", fd.0, addr, len, res);
         }
@@ -286,7 +286,7 @@ impl Linux<PassthruFd> for Passthru {
 
     fn setsockopt(&mut self, proc: &CapturedProcess, fd: &mut PassthruFd, level: c_int, optname: c_int, optval: *const c_void, optlen: libc::socklen_t) -> nix::Result<c_int> {
         let regs = proc.get_regs()?;
-        let res = proc.setsockopt(fd.0, level, optname, regs.r10, optlen)?;
+        let res = proc.setsockopt(fd.0, level, optname, regs.arg4(), optlen)?;
         if self.verbose {
             println!("setsockopt({}, {}, {}, {:?}, {}) = {}", fd.0, level, optname, optval, optlen, res);
         }
@@ -295,7 +295,7 @@ impl Linux<PassthruFd> for Passthru {
 
     fn getsockname(&mut self, proc: &CapturedProcess, fd: &mut PassthruFd, addr: *mut libc::sockaddr, len: *mut libc::socklen_t) -> nix::Result<c_int> {
         let regs = proc.get_regs()?;
-        let res = proc.getsockname(fd.0, regs.rsi, regs.rdx)?;
+        let res = proc.getsockname(fd.0, regs.arg2(), regs.arg3())?;
         if self.verbose {
             println!("getsockname({}, {:?}, {:?}) = {}", fd.0, addr, len, res);
         }
@@ -304,8 +304,8 @@ impl Linux<PassthruFd> for Passthru {
 
     fn pread(&mut self, proc: &CapturedProcess, fd: &mut PassthruFd, count: usize, offset: off_t) -> nix::Result<Vec<u8>> {
         let regs = proc.get_regs()?;
-        let res = proc.pread(fd.0, regs.rsi, count, offset)?;
-        let buf = proc.read_memory(regs.rsi as usize, res as usize);
+        let res = proc.pread(fd.0, regs.arg2(), count, offset)?;
+        let buf = proc.read_memory(regs.arg2() as usize, res as usize);
         if self.verbose {
             println!("pread({}, ..., {}, {}) = {}", fd.0, count, offset, res);
         }
@@ -314,10 +314,10 @@ impl Linux<PassthruFd> for Passthru {
 
     fn poll(&mut self, proc: &CapturedProcess, fds: &mut [PollFd<PassthruFd>], timeout: c_int) -> nix::Result<c_int> {
         let regs = proc.get_regs()?;
-        let res = proc.poll(regs.rdi, fds.len() as libc::nfds_t, timeout)?;
+        let res = proc.poll(regs.arg1(), fds.len() as libc::nfds_t, timeout)?;
         
         // Update fds from guest memory to ensure revents are captured
-        let addr = regs.rdi as usize;
+        let addr = regs.arg1() as usize;
         let pollfd_size = std::mem::size_of::<libc::pollfd>();
         for (i, fd) in fds.iter_mut().enumerate() {
             let fd_addr = addr + i * pollfd_size;
@@ -335,7 +335,7 @@ impl Linux<PassthruFd> for Passthru {
 
     fn sendto(&mut self, proc: &CapturedProcess, fd: &mut PassthruFd, buf: &[u8], flags: c_int, _addr: *const libc::sockaddr, _len: libc::socklen_t) -> nix::Result<usize> {
         let regs = proc.get_regs()?;
-        let res = proc.sendto(fd.0, regs.rsi, buf.len(), flags, regs.r8, regs.r9 as libc::socklen_t)?;
+        let res = proc.sendto(fd.0, regs.arg2(), buf.len(), flags, regs.arg5(), regs.arg6() as libc::socklen_t)?;
         if self.verbose {
             println!("sendto({}, ..., {}, ...) = {}", fd.0, buf.len(), res);
         }
@@ -344,8 +344,8 @@ impl Linux<PassthruFd> for Passthru {
 
     fn recvfrom(&mut self, proc: &CapturedProcess, fd: &mut PassthruFd, count: usize, flags: c_int, _addr: *mut libc::sockaddr, _len: *mut libc::socklen_t) -> nix::Result<Vec<u8>> {
         let regs = proc.get_regs()?;
-        let res = proc.recvfrom(fd.0, regs.rsi, count, flags, regs.r8, regs.r9)?;
-        let buf = proc.read_memory(regs.rsi as usize, res as usize);
+        let res = proc.recvfrom(fd.0, regs.arg2(), count, flags, regs.arg5(), regs.arg6())?;
+        let buf = proc.read_memory(regs.arg2() as usize, res as usize);
         if self.verbose {
             println!("recvfrom({}, ..., {}) = {}", fd.0, count, res);
         }
@@ -370,16 +370,26 @@ impl Linux<PassthruFd> for Passthru {
 
     fn unlink(&mut self, proc: &CapturedProcess, pathname: &str) -> nix::Result<c_int> {
         let regs = proc.get_regs()?;
-        let res = proc.unlink(regs.rdi as u64)?;
+        let res = proc.unlink(regs.arg1() as u64)?;
         if self.verbose {
             println!("unlink({:?}) = {}", pathname, res);
         }
         Ok(res as c_int)
     }
 
+    fn unlinkat(&mut self, proc: &CapturedProcess, dirfd: Option<&mut PassthruFd>, pathname: &str, flags: c_int) -> nix::Result<c_int> {
+        let regs = proc.get_regs()?;
+        let dirfd_val = dirfd.map(|fd| fd.0).unwrap_or(libc::AT_FDCWD);
+        let res = proc.unlinkat(dirfd_val, regs.arg2(), flags)?;
+        if self.verbose {
+            println!("unlinkat({}, {:?}, {}) = {}", dirfd_val, pathname, flags, res);
+        }
+        Ok(res as c_int)
+    }
+
     fn pwrite(&mut self, proc: &CapturedProcess, fd: &mut PassthruFd, buf: &[u8], offset: off_t) -> nix::Result<usize> {
         let regs = proc.get_regs()?;
-        let res = proc.pwrite(fd.0, regs.rsi, buf.len(), offset)?;
+        let res = proc.pwrite(fd.0, regs.arg2(), buf.len(), offset)?;
         if self.verbose {
             println!("pwrite({}, ..., {}) = {}", fd.0, buf.len(), res);
         }
@@ -404,12 +414,12 @@ impl Linux<PassthruFd> for Passthru {
 
     fn getcwd(&mut self, proc: &CapturedProcess, size: usize) -> nix::Result<Vec<u8>> {
         let regs = proc.get_regs()?;
-        let res = proc.getcwd(regs.rdi, size)?;
+        let res = proc.getcwd(regs.arg1(), size)?;
         if self.verbose {
-            println!("getcwd({:?}...) = {}", regs.rdi, res);
+            println!("getcwd({:?}...) = {}", regs.arg1(), res);
         }
         if res > 0 {
-             Ok(proc.read_memory(regs.rdi as usize, res as usize))
+             Ok(proc.read_memory(regs.arg1() as usize, res as usize))
         } else {
              Ok(Vec::new())
         }
@@ -449,8 +459,8 @@ impl Linux<PassthruFd> for Passthru {
 
     fn getrandom(&mut self, proc: &CapturedProcess, buf: &mut [u8], flags: c_int) -> nix::Result<usize> {
         let regs = proc.get_regs()?;
-        let res = proc.getrandom(regs.rdi, buf.len(), flags)?;
-        let read_buf = proc.read_memory(regs.rdi as usize, res as usize);
+        let res = proc.getrandom(regs.arg1(), buf.len(), flags)?;
+        let read_buf = proc.read_memory(regs.arg1() as usize, res as usize);
         let n = std::cmp::min(res as usize, read_buf.len());
         buf[..n].copy_from_slice(&read_buf[..n]);
         if self.verbose {
@@ -461,7 +471,7 @@ impl Linux<PassthruFd> for Passthru {
 
     fn gettimeofday(&mut self, proc: &CapturedProcess) -> nix::Result<c_int> {
         let regs = proc.get_regs()?;
-        let res = proc.gettimeofday(regs.rdi, regs.rsi)?;
+        let res = proc.gettimeofday(regs.arg1(), regs.arg2())?;
         if self.verbose {
             println!("gettimeofday(..., ...) = {}", res);
         }
@@ -494,7 +504,7 @@ impl Linux<PassthruFd> for Passthru {
 
     fn uname(&mut self, proc: &CapturedProcess) -> nix::Result<c_int> {
         let regs = proc.get_regs()?;
-        let res = proc.uname(regs.rdi)?;
+        let res = proc.uname(regs.arg1())?;
         if self.verbose {
             println!("uname(...) = {}", res);
         }
@@ -503,7 +513,7 @@ impl Linux<PassthruFd> for Passthru {
 
     fn sysinfo(&mut self, proc: &CapturedProcess) -> nix::Result<c_int> {
         let regs = proc.get_regs()?;
-        let res = proc.sysinfo(regs.rdi)?;
+        let res = proc.sysinfo(regs.arg1())?;
         if self.verbose {
             println!("sysinfo(...) = {}", res);
         }
@@ -528,7 +538,7 @@ impl Linux<PassthruFd> for Passthru {
 
     fn times(&mut self, proc: &CapturedProcess) -> nix::Result<c_int> {
         let regs = proc.get_regs()?;
-        let res = proc.times(regs.rdi)?;
+        let res = proc.times(regs.arg1())?;
         if self.verbose {
             println!("times(...) = {}", res);
         }

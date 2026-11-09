@@ -325,7 +325,7 @@ virtualized_test!(
         assert_eq!(nodename, "sandbox");
         assert_eq!(release, "6.0.0-deterministic");
         assert_eq!(version, "#1 SMP DETERMINISTIC");
-        assert_eq!(machine, "x86_64");
+        assert_eq!(machine, std::env::consts::ARCH);
     }
 );
 
@@ -380,6 +380,7 @@ sandbox_test!(
     }
 );
 
+#[cfg(target_arch = "x86_64")]
 nondeterminism_test!(
     rdtsc_and_rdtscp_emulation,
     || unsafe {
@@ -395,6 +396,7 @@ nondeterminism_test!(
     }
 );
 
+#[cfg(target_arch = "x86_64")]
 sandbox_test!(
     cpuid_feature_masking,
     || {
@@ -411,6 +413,30 @@ sandbox_test!(
     |&(apic_id, _, _, x2apic_id)| {
         assert_eq!(apic_id, 0);
         assert_eq!(x2apic_id, 0);
+    }
+);
+
+#[cfg(target_arch = "aarch64")]
+sandbox_test!(
+    aarch64_mrs_and_hwcap2_emulation,
+    || unsafe {
+        // 1. AT_HWCAP2 (26) must have HWCAP2_RNG (bit 16) masked out in deterministic mode
+        let hwcap2 = libc::getauxval(26);
+        let has_rng_hwcap = (hwcap2 & (1 << 16)) != 0;
+
+        // 2. MRS RNDR (s3_3_c2_c4_0 = 0xd53b2400) traps with SIGILL when FEAT_RNG is absent/disabled
+        // and is emulated by Deterministic::emulate_rdtsc
+        let rndr_val: u64;
+        core::arch::asm!(
+            ".inst 0xd53b2400",
+            out("x0") rndr_val,
+            options(nomem, nostack)
+        );
+        (has_rng_hwcap, rndr_val)
+    },
+    |&(has_rng_hwcap, rndr_val)| {
+        assert!(!has_rng_hwcap, "HWCAP2_RNG must be masked out in deterministic sandbox");
+        assert_eq!(rndr_val, 0x4242_4242_4242_4242);
     }
 );
 

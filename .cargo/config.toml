@@ -1,0 +1,7 @@
+[target.aarch64-unknown-linux-gnu]
+linker = "./scripts/aarch64-gnu-linker.sh"
+runner = "./scripts/qemu-aarch64-runner.sh"
+
+[target.aarch64-unknown-linux-musl]
+linker = "./scripts/aarch64-musl-linker.sh"
+runner = "./scripts/qemu-aarch64-runner.sh"

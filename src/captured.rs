@@ -4,6 +4,70 @@ use nix::unistd::Pid;
 use libc::{c_int, c_void, mode_t, off_t};
 use nix::Result;
 
+pub trait ArchRegs {
+    fn syscall_nr(&self) -> u64;
+    fn arg1(&self) -> u64;
+    fn arg2(&self) -> u64;
+    fn arg3(&self) -> u64;
+    fn arg4(&self) -> u64;
+    fn arg5(&self) -> u64;
+    fn arg6(&self) -> u64;
+    fn set_args(&mut self, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64, a6: u64);
+    fn ret(&self) -> u64;
+    fn set_ret(&mut self, val: u64);
+    fn sp(&self) -> u64;
+    fn pc(&self) -> u64;
+    fn set_pc(&mut self, val: u64);
+}
+
+#[cfg(target_arch = "x86_64")]
+impl ArchRegs for libc::user_regs_struct {
+    fn syscall_nr(&self) -> u64 { self.orig_rax }
+    fn arg1(&self) -> u64 { self.rdi }
+    fn arg2(&self) -> u64 { self.rsi }
+    fn arg3(&self) -> u64 { self.rdx }
+    fn arg4(&self) -> u64 { self.r10 }
+    fn arg5(&self) -> u64 { self.r8 }
+    fn arg6(&self) -> u64 { self.r9 }
+    fn set_args(&mut self, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64, a6: u64) {
+        self.rdi = a1;
+        self.rsi = a2;
+        self.rdx = a3;
+        self.r10 = a4;
+        self.r8 = a5;
+        self.r9 = a6;
+    }
+    fn ret(&self) -> u64 { self.rax }
+    fn set_ret(&mut self, val: u64) { self.rax = val; }
+    fn sp(&self) -> u64 { self.rsp }
+    fn pc(&self) -> u64 { self.rip }
+    fn set_pc(&mut self, val: u64) { self.rip = val; }
+}
+
+#[cfg(target_arch = "aarch64")]
+impl ArchRegs for libc::user_regs_struct {
+    fn syscall_nr(&self) -> u64 { self.regs[8] }
+    fn arg1(&self) -> u64 { self.regs[0] }
+    fn arg2(&self) -> u64 { self.regs[1] }
+    fn arg3(&self) -> u64 { self.regs[2] }
+    fn arg4(&self) -> u64 { self.regs[3] }
+    fn arg5(&self) -> u64 { self.regs[4] }
+    fn arg6(&self) -> u64 { self.regs[5] }
+    fn set_args(&mut self, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64, a6: u64) {
+        self.regs[0] = a1;
+        self.regs[1] = a2;
+        self.regs[2] = a3;
+        self.regs[3] = a4;
+        self.regs[4] = a5;
+        self.regs[5] = a6;
+    }
+    fn ret(&self) -> u64 { self.regs[0] }
+    fn set_ret(&mut self, val: u64) { self.regs[0] = val; }
+    fn sp(&self) -> u64 { self.sp }
+    fn pc(&self) -> u64 { self.pc }
+    fn set_pc(&mut self, val: u64) { self.pc = val; }
+}
+
 pub struct CapturedProcess {
     pub pid: Pid,
 }
@@ -31,18 +95,66 @@ impl CapturedProcess {
         ptrace::setregs(self.pid, regs)
     }
 
+    #[cfg(target_arch = "x86_64")]
+    fn set_syscall_regs(&self, regs: &mut libc::user_regs_struct, nr: i32) -> Result<()> {
+        regs.orig_rax = nr as i64 as u64;
+        regs.rax = nr as i64 as u64;
+        self.set_regs(*regs)
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    fn set_syscall_regs(&self, regs: &mut libc::user_regs_struct, nr: i32) -> Result<()> {
+        regs.regs[8] = nr as i64 as u64;
+        self.set_regs(*regs)?;
+        const NT_ARM_SYSTEM_CALL: libc::c_int = 0x404;
+        let mut sysno: libc::c_int = nr;
+        let mut iov = libc::iovec {
+            iov_base: (&mut sysno as *mut libc::c_int).cast(),
+            iov_len: std::mem::size_of::<libc::c_int>(),
+        };
+        let res = unsafe {
+            libc::ptrace(
+                libc::PTRACE_SETREGSET,
+                libc::pid_t::from(self.pid),
+                NT_ARM_SYSTEM_CALL as *mut libc::c_void,
+                (&mut iov as *mut libc::iovec).cast::<libc::c_void>(),
+            )
+        };
+        nix::errno::Errno::result(res).map(drop)
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    fn restore_caller_regs(dst: &mut libc::user_regs_struct, orig: &libc::user_regs_struct, restore_arg1: bool) {
+        if restore_arg1 {
+            dst.rdi = orig.rdi;
+        }
+        dst.rsi = orig.rsi;
+        dst.rdx = orig.rdx;
+        dst.r10 = orig.r10;
+        dst.r8 = orig.r8;
+        dst.r9 = orig.r9;
+        dst.rcx = orig.rcx;
+        dst.r11 = orig.r11;
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    fn restore_caller_regs(dst: &mut libc::user_regs_struct, orig: &libc::user_regs_struct, restore_arg1: bool) {
+        if restore_arg1 {
+            dst.regs[0] = orig.regs[0];
+        }
+        dst.regs[1] = orig.regs[1];
+        dst.regs[2] = orig.regs[2];
+        dst.regs[3] = orig.regs[3];
+        dst.regs[4] = orig.regs[4];
+        dst.regs[5] = orig.regs[5];
+        dst.regs[8] = orig.regs[8];
+    }
+
     pub fn syscall(&self, nr: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64, arg5: u64, arg6: u64) -> Result<i64> {
         let orig_regs = self.get_regs()?;
         let mut regs = orig_regs;
-        regs.orig_rax = nr;
-        regs.rax = nr;
-        regs.rdi = arg1;
-        regs.rsi = arg2;
-        regs.rdx = arg3;
-        regs.r10 = arg4;
-        regs.r8 = arg5;
-        regs.r9 = arg6;
-        self.set_regs(regs)?;
+        regs.set_args(arg1, arg2, arg3, arg4, arg5, arg6);
+        self.set_syscall_regs(&mut regs, nr as i32)?;
         
         let mut pending_sig = None;
         let mut in_syscall = true;
@@ -58,13 +170,13 @@ impl CapturedProcess {
                 nix::sys::wait::WaitStatus::PtraceSyscall(_) => {
                     if !in_syscall {
                         // Restarted syscall entry stop
-                        self.set_regs(regs)?;
+                        self.set_syscall_regs(&mut regs, nr as i32)?;
                         in_syscall = true;
                         continue;
                     }
                     in_syscall = false;
                     result_regs = self.get_regs()?;
-                    res = result_regs.rax as i64;
+                    res = result_regs.ret() as i64;
                     if matches!(res, -512 | -513 | -514 | -516) {
                         // Syscall was interrupted by a pending signal (ERESTARTSYS etc.);
                         // let the kernel dequeue the signal and restart the syscall.
@@ -86,15 +198,8 @@ impl CapturedProcess {
                 }
             }
         }
-        if nr != orig_regs.orig_rax {
-            result_regs.rdi = orig_regs.rdi;
-            result_regs.rsi = orig_regs.rsi;
-            result_regs.rdx = orig_regs.rdx;
-            result_regs.r10 = orig_regs.r10;
-            result_regs.r8 = orig_regs.r8;
-            result_regs.r9 = orig_regs.r9;
-            result_regs.rcx = orig_regs.rcx;
-            result_regs.r11 = orig_regs.r11;
+        if nr != orig_regs.syscall_nr() {
+            Self::restore_caller_regs(&mut result_regs, &orig_regs, cfg!(target_arch = "x86_64"));
             let _ = self.set_regs(result_regs);
         }
         if res < 0 && res > -4096 {
@@ -107,9 +212,7 @@ impl CapturedProcess {
     pub fn skip_syscall(&self) -> Result<i64> {
         let orig_regs = self.get_regs()?;
         let mut regs = orig_regs;
-        regs.orig_rax = u64::MAX;
-        regs.rax = u64::MAX;
-        self.set_regs(regs)?;
+        self.set_syscall_regs(&mut regs, -1)?;
         
         let mut pending_sig = None;
         loop {
@@ -133,14 +236,7 @@ impl CapturedProcess {
         }
         
         if let Ok(mut current_regs) = self.get_regs() {
-            current_regs.rdi = orig_regs.rdi;
-            current_regs.rsi = orig_regs.rsi;
-            current_regs.rdx = orig_regs.rdx;
-            current_regs.r10 = orig_regs.r10;
-            current_regs.r8 = orig_regs.r8;
-            current_regs.r9 = orig_regs.r9;
-            current_regs.rcx = orig_regs.rcx;
-            current_regs.r11 = orig_regs.r11;
+            Self::restore_caller_regs(&mut current_regs, &orig_regs, true);
             let _ = self.set_regs(current_regs);
         }
         Ok(0)
@@ -201,7 +297,14 @@ impl CapturedProcess {
     }
 
     pub fn open(&self, addr: u64, flags: c_int, mode: mode_t) -> Result<i64> {
-        self.syscall(libc::SYS_open as u64, addr, flags as u64, mode as u64, 0, 0, 0)
+        #[cfg(target_arch = "x86_64")]
+        {
+            self.syscall(libc::SYS_open as u64, addr, flags as u64, mode as u64, 0, 0, 0)
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
+            self.openat(libc::AT_FDCWD, addr, flags, mode)
+        }
     }
 
     pub fn openat(&self, dirfd: c_int, addr: u64, flags: c_int, mode: mode_t) -> Result<i64> {
@@ -221,7 +324,14 @@ impl CapturedProcess {
     }
 
     pub fn dup2(&self, oldfd: c_int, newfd: c_int) -> Result<i64> {
-        self.syscall(libc::SYS_dup2 as u64, oldfd as u64, newfd as u64, 0, 0, 0, 0)
+        #[cfg(target_arch = "x86_64")]
+        {
+            self.syscall(libc::SYS_dup2 as u64, oldfd as u64, newfd as u64, 0, 0, 0, 0)
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
+            self.dup3(oldfd, newfd, 0)
+        }
     }
 
     pub fn dup3(&self, oldfd: c_int, newfd: c_int, flags: c_int) -> Result<i64> {
@@ -229,11 +339,25 @@ impl CapturedProcess {
     }
 
     pub fn stat(&self, addr: u64, statbuf: u64) -> Result<i64> {
-        self.syscall(libc::SYS_stat as u64, addr, statbuf, 0, 0, 0, 0)
+        #[cfg(target_arch = "x86_64")]
+        {
+            self.syscall(libc::SYS_stat as u64, addr, statbuf, 0, 0, 0, 0)
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
+            self.newfstatat(libc::AT_FDCWD, addr, statbuf, 0)
+        }
     }
 
     pub fn lstat(&self, addr: u64, statbuf: u64) -> Result<i64> {
-        self.syscall(libc::SYS_lstat as u64, addr, statbuf, 0, 0, 0, 0)
+        #[cfg(target_arch = "x86_64")]
+        {
+            self.syscall(libc::SYS_lstat as u64, addr, statbuf, 0, 0, 0, 0)
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
+            self.newfstatat(libc::AT_FDCWD, addr, statbuf, libc::AT_SYMLINK_NOFOLLOW)
+        }
     }
 
     pub fn fstat(&self, fd: c_int, addr: u64) -> Result<i64> {
@@ -308,8 +432,16 @@ impl CapturedProcess {
         self.syscall(libc::SYS_pread64 as u64, fd as u64, addr, count as u64, offset as u64, 0, 0)
     }
 
-    pub fn poll(&self, fds_addr: u64, nfds: libc::nfds_t, timeout: c_int) -> Result<i64> {
-        self.syscall(libc::SYS_poll as u64, fds_addr, nfds as u64, timeout as u64, 0, 0, 0)
+    pub fn poll(&self, fds_addr: u64, nfds: libc::nfds_t, _timeout: c_int) -> Result<i64> {
+        #[cfg(target_arch = "x86_64")]
+        {
+            self.syscall(libc::SYS_poll as u64, fds_addr, nfds as u64, _timeout as u64, 0, 0, 0)
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
+            let regs = self.get_regs()?;
+            self.syscall(libc::SYS_ppoll as u64, fds_addr, nfds as u64, regs.arg3(), regs.arg4(), regs.arg5(), 0)
+        }
     }
 
     pub fn sendto(&self, fd: c_int, buf_addr: u64, len: usize, flags: c_int, dest_addr: u64, addrlen: libc::socklen_t) -> Result<i64> {
@@ -329,7 +461,18 @@ impl CapturedProcess {
     }
 
     pub fn unlink(&self, addr: u64) -> Result<i64> {
-        self.syscall(libc::SYS_unlink as u64, addr, 0, 0, 0, 0, 0)
+        #[cfg(target_arch = "x86_64")]
+        {
+            self.syscall(libc::SYS_unlink as u64, addr, 0, 0, 0, 0, 0)
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
+            self.unlinkat(libc::AT_FDCWD, addr, 0)
+        }
+    }
+
+    pub fn unlinkat(&self, dirfd: c_int, addr: u64, flags: c_int) -> Result<i64> {
+        self.syscall(libc::SYS_unlinkat as u64, dirfd as i64 as u64, addr, flags as u64, 0, 0, 0)
     }
 
     pub fn pwrite(&self, fd: c_int, addr: u64, count: usize, offset: off_t) -> Result<i64> {
@@ -380,8 +523,15 @@ impl CapturedProcess {
         self.syscall(libc::SYS_gettimeofday as u64, tv_addr, tz_addr, 0, 0, 0, 0)
     }
 
-    pub fn time(&self, tloc_addr: u64) -> Result<i64> {
-        self.syscall(libc::SYS_time as u64, tloc_addr, 0, 0, 0, 0, 0)
+    pub fn time(&self, _tloc_addr: u64) -> Result<i64> {
+        #[cfg(target_arch = "x86_64")]
+        {
+            self.syscall(libc::SYS_time as u64, _tloc_addr, 0, 0, 0, 0, 0)
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
+            Err(nix::errno::Errno::ENOSYS)
+        }
     }
 
     pub fn getppid(&self) -> Result<i64> {
@@ -389,7 +539,14 @@ impl CapturedProcess {
     }
 
     pub fn getpgrp(&self) -> Result<i64> {
-        self.syscall(libc::SYS_getpgrp as u64, 0, 0, 0, 0, 0, 0)
+        #[cfg(target_arch = "x86_64")]
+        {
+            self.syscall(libc::SYS_getpgrp as u64, 0, 0, 0, 0, 0, 0)
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
+            self.syscall(libc::SYS_getpgid as u64, 0, 0, 0, 0, 0, 0)
+        }
     }
 
     pub fn uname(&self, addr: u64) -> Result<i64> {
